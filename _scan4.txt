@@ -1,0 +1,19 @@
+--- 3568: url: "/Product/SaveProductColorSizeBase",
+--- 3786: _this.saveProductColorSizeGroup(group);
+--- 3961: saveProductColorSizeGroup: function (group) {
+--- 3966: url: "/Product/SaveProductColorSizeGroup",
+--- 5769: _this.saveProduct();
+--- 9180: saveProduct: function () {
+--- 9201: url = "/Product/SaveProducts";
+--- 9210: url = "/Product/SaveProducts";
+--- 9220: url = "/Product/SaveProduct";
+--- 9222: "productJson": JSON.stringify(product)
+--- 9515: opts.url = "/Product/UploadProductImage";
+--- 9525: up.settings.url = "/Product/UploadProductImage?userId=" + userSelector.getSelectedValue() + "&productId=" + $("#editArea").data("id") + "&forMulColorSize=" + $("#editArea").data("isMulColorSize");
+--- 10186: data.productJson = JSON.stringify(this.product);
+--- 10372: data.productJson = JSON.stringify(this.product);
+--- 12351: opts.url = "/Product/UploadProductImage";
+--- 12362: up.settings.url = "/Product/UploadProductImageForBatchImport?storeId=" + _this.importStoreSelector.getSelectedValue() + "&updateExistingProduct=" + (updateExistingProduct == "1") + "&importType=" + _this.importType;
+--- 12556: opts.url = "/Product/UploadProductImage";
+--- 12565: up.settings.url = "/Product/UploadProductImage?userId=" + userSelector.getSelectedValue() + "&productId=0";
+--- 15922: url: '/Product/SaveProductBarcodeGenerationRule',

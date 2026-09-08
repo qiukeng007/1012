@@ -1,0 +1,81 @@
+480:   Future<void> _processJob(QueryService qs, PhotoJob job) async {
+481:     if (job.superseded || _cancelledIds.contains(job.id)) {
+482:       await _finishSuperseded(job);
+483:       return;
+484:     }
+485:     job.status = PhotoJobStatus.processing;
+486:     job.startedAt ??= DateTime.now().toIso8601String();
+487:     await _saveQueueJob(job);
+488:     await refreshCount();
+489:     _notify();
+490: 
+491:     // 预解析图片字节（所有门店共用一份）
+492:     List<int>? bytes;
+493:     String? resolveErr;
+494:     if (job.imageFile != null) {
+495:       final f = File(
+496:           '${(await _imgDir()).path}${Platform.pathSeparator}${job.imageFile}');
+497:       try {
+498:         if (await f.exists()) bytes = await f.readAsBytes();
+499:       } catch (_) {}
+500:       if (bytes == null) resolveErr = '本地图片文件缺失';
+501:     } else if (job.sourceUrl != null) {
+502:       bytes = await ProductImageCache.loadBytes(job.sourceUrl!);
+503:       if (bytes == null) resolveErr = '原图下载失败';
+504:     } else {
+505:       resolveErr = '缺少图片来源';
+506:     }
+507: 
+508:     final storeResults = List<PhotoStoreResult>.from(job.results);
+509:     var realRun = false;
+510: 
+511:     // 同一任务内的各门店并行上传，避免串行等待拖慢整个队列
+512:     final todoStores = job.stores
+513:         .where((store) => !storeResults.any((r) =>
+514:             r.storeKey == store.storeKey && r.status == 'success'))
+515:         .toList();
+516: 
+517:     // 每个门店完成即保存进度（与串行版一致的崩溃恢复语义），门店之间并发执行
+518:     final ranFlags = <bool>[];
+519:     await Future.wait(todoStores.map((store) async {
+520:       if (job.superseded || _cancelledIds.contains(job.id)) return;
+521:       final result = await _runStore(
+522:         qs,
+523:         job,
+524:         store,
+525:         bytes: bytes,
+526:         resolveErr: resolveErr,
+527:       );
+528:       storeResults.removeWhere((r) => r.storeKey == result.storeKey);
+529:       storeResults.add(result);
+530:       job.results = storeResults;
+531:       ranFlags.add(result.status != 'waitingLogin');
+532:       await _saveQueueJob(job);
+533:       _notify();
+534:     }));
+535:     realRun = ranFlags.any((ran) => ran);
+536: 
+537:     if (job.superseded || _cancelledIds.contains(job.id)) {
+538:       await _finishSuperseded(job);
+539:       return;
+540:     }
+541: 
+542:     final successCount =
+543:         storeResults.where((r) => r.status == 'success').length;
+544:     final waitingCount =
+545:         storeResults.where((r) => r.status == 'waitingLogin').length;
+546: 
+547:     if (successCount == job.stores.length) {
+548:       await _finalize(job, PhotoJobStatus.success);
+549:       return;
+550:     }
+551: 
+552:     if (waitingCount == job.stores.length) {
+553:       // 全部未登录：不消耗次数，等待登录后继续
+554:       job.status = PhotoJobStatus.waitingLogin;
+555:       await _saveQueueJob(job);
+556:       await refreshCount();
+557:       _notify();
+558:       return;
+559:     }
+560: 

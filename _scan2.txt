@@ -1,0 +1,113 @@
+10348:     confirmUpdateProductToStores: function (stores, product, fromUserId) {
+10349:         var _this = this;
+10350:         new pospal.ui.msgBox({
+10351:             boxType: "confirm",
+10352:             content: lang.tryGet("确认同步商品"),
+10353:             confirmText: lang.tryGet("是"),
+10354:             cancelText: lang.tryGet("否"),
+10355:             onConfirm: function () {
+10356:                 if (this.confirmValue) {
+10357:                     _this.bulidStoreList(stores, "update");
+10358:                     _this.show(true);
+10359:                     _this.product = product;
+10360:                     _this.fromUserId = fromUserId;
+10361:                 }
+10362:                 else if (fromActionPage) {
+10363:                     actionPage.clearFormParams();
+10364:                 }
+10365:             }
+10366:         });
+10367:     },
+10368: 
+10369:     syncUpdateProductToStores: function () {
+10370:         var data = {
+10371:         };
+10372:         data.productJson = JSON.stringify(this.product);
+10373:         data.fromUserId = this.fromUserId;
+10374: 
+10375:         var attributeList = [];
+10376:         $("#syncDiv .attributeCheckBoxList div.checkBoxDiv.on").each(function (index, item) {
+10377:             attributeList.push($(item).find("div").attr("data"));
+10378:         });
+10379: 
+10380:         if (attributeList.length == 0) {
+10381:             new pospal.ui.msgBox(lang.tryGet("同步字段必选"));
+10382:             return false;
+10383:         }
+10384: 
+10385:         attributeList.push("attribute5");
+10386:         attributeList.push("attribute7");
+10387:         if (hasProductAttribute9) attributeList.push("attribute9");
+10388:         if (actionParams && actionParams.product && actionParams.product.barcode.toLowerCase() == this.product.barcode.toLowerCase()) attributeList.push("extAttribute");
+10389:         data.attributesJson = JSON.stringify(attributeList);
+10390: 
+10391:         pospal.setCookie("syncUpdateProductAttributes", JSON.stringify(attributeList), 365 * 24);
+10392:         this.ajaxSyncToStores("/Product/SyncUpdateProductToStores", data, true);
+10393:     },
+10394: 
+10395:     ajaxSyncToStores: function (url, data, useJob) {
+10396:         var toStoreIds = this.getSelectedStoreIds();
+10397:         if (toStoreIds.length == 0) {
+10398:             new pospal.ui.msgBox(lang.tryGet("同步门店必选"));
+10399:             return false;
+10400:         }
+10401: 
+10402:         var _this = this;
+10403:         _this.SyncedNum = 0;
+10404:         var syncLimit = $("#hf_userJobToSyncProductLimit").val();
+10405:         if (useJob && hasUserJobServiceAuth && toStoreIds.length >= syncLimit) {
+10406:             var postData = {};
+10407:             postData.action = url.substring(url.lastIndexOf("\/") + 1, url.length);
+10408:             postData.toUserIds = toStoreIds;
+10409:             $.extend(postData, data);
+10410: 
+10411:             _this.saveUserJob(postData);
+10412:             return;
+10413:         }
+10414: 
+10415:         var limit = _this.getLimit(toStoreIds);
+10416:         var batch = pospal.find(_this.batchUrl, function (it) {
+10417:             return it.url == url
+10418:         })
+10419:         if (limit > 1 && batch) {
+10420:             _this.ajaxSyncToStoresV2(batch.batchUrl, data, limit);
+10421:             return;
+10422:         }
+10423: 
+10424:         var failedNum = 0;
+10425:         function ajaxPost(toStoreId) {
+10426:             data.userId = toStoreId;
+10427:             var $li = $("#syncDiv .copyStore ul div[data=" + toStoreId + "]").parent().parent().parent();
+10428:             if (_this.toStoreSelector) _this.toStoreSelector.setSyncInfo(toStoreId, lang.tryGet("进行中"), '');
+10429:             $("#syncDiv .mCustomScrollbar").mCustomScrollbar('scrollTo', $li, {
+10430:                 scrollInertia: 600
+10431:             });
+10432:             return pospal.ajax({
+10433:                 url: url,
+10434:                 data: data,
+10435:                 success: function (result) {
+10436:                     _this.SyncedNum++;
+10437:                     if (result.successed) {
+10438:                         if (_this.toStoreSelector) _this.toStoreSelector.setSyncInfo(toStoreId, lang.tryGet("已完成"), '');
+10439:                     } else {
+10440:                         failedNum++;
+10441:                         if (_this.toStoreSelector) _this.toStoreSelector.setSyncInfo(toStoreId, lang.tryGet("复制失败"), result.msg.replace("\\n", "\n"));
+10442:                     }
+10443:                     _this.buildProcessUI();
+10444:                 }
+10445:             });
+10446:         }
+10447: 
+10448:         var doing = new pospal.ui.loading($("#syncDiv"), true);
+10449:         pospal.concurrentAjax(toStoreIds, ajaxPost, limit).then(function () {
+10450:             doing.destroy();
+10451:             if (failedNum > 0) {
+10452:                 new pospal.ui.msgBox({
+10453:                     content: lang.tryFormat("共X门店同步商品失败", [failedNum]) + "，请确认。",
+10454:                     autoCloseSec: 0
+10455:                 });
+10456:                 $("#syncDiv .confirm").hide();
+10457:                 return false;
+10458:             }
+10459: 
+10460:             _this.hide();

@@ -1,0 +1,179 @@
+1767:   Future<String?> updateProductOperationNote(
+1768:     StoreConfig store,
+1769:     String barcode,
+1770:     String operatorName,
+1771:     String actionLabel, {
+1772:     String? productUid,
+1773:   }) async {
+1774:     final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+1775:     final code = barcode.trim();
+1776:     if (code.isEmpty) return '条码为空';
+1777: 
+1778:     final cookie = await _sessionManager.getCookie(store.storeKey);
+1779:     if (cookie == null || cookie.isEmpty) return '未登录';
+1780: 
+1781:     try {
+1782:       // 1. 获取 userId
+1783:       final userId = await _resolveStoreUserId(store, cookie);
+1784:       if (userId == null) return '无法获取门店信息';
+1785: 
+1786:       // 2. 搜索条码获取 productId
+1787:       final pageData = _encodeForm({
+1788:         'userId': userId,
+1789:         'enable': '1',
+1790:         'productTagUidsJson': '[]',
+1791:         'keyword': code,
+1792:         'groupBySpu': 'false',
+1793:         'categorysJson': '[]',
+1794:         'supplierUid': '',
+1795:         'categoryType': '',
+1796:         'pageIndex': '1',
+1797:         'pageSize': '20',
+1798:         'orderColumn': '',
+1799:         'asc': 'true',
+1800:       });
+1801: 
+1802:       final searchUri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
+1803:       final searchReq = await _httpClient.postUrl(searchUri);
+1804:       searchReq.headers.set('User-Agent', _ua);
+1805:       searchReq.headers.set('Accept', 'application/json, text/javascript, */*');
+1806:       searchReq.headers.set('Referer', '$baseUrl/Product/Manage');
+1807:       searchReq.headers.set('Origin', baseUrl);
+1808:       searchReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+1809:       searchReq.headers.set('Content-Type',
+1810:           'application/x-www-form-urlencoded; charset=UTF-8');
+1811:       searchReq.headers.set('Cookie', cookie);
+1812:       searchReq.followRedirects = false;
+1813:       searchReq.write(pageData);
+1814:       final searchResp = await searchReq.close().timeout(const Duration(seconds: 15));
+1815:       final searchBody = await _readBody(searchResp);
+1816: 
+1817:       if (searchResp.statusCode != 200) {
+1818:         return '搜索失败 (HTTP ${searchResp.statusCode})';
+1819:       }
+1820: 
+1821:       Map<String, dynamic> searchData;
+1822:       try {
+1823:         searchData = jsonDecode(searchBody) as Map<String, dynamic>;
+1824:       } catch (_) {
+1825:         return '搜索返回格式异常';
+1826:       }
+1827: 
+1828:       final contentView = searchData['contentView'] as String? ?? '';
+1829:       // 优先按商品 uid 精准定位（同一条码多个商品时更新用户选中的那一个）
+1830:       String? productId;
+1831:       if (productUid != null && productUid.isNotEmpty) {
+1832:         final uidRowRegex = RegExp(
+1833:             r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>');
+1834:         for (final m in uidRowRegex.allMatches(contentView)) {
+1835:           if (m.group(2) == productUid) {
+1836:             productId = m.group(1);
+1837:             break;
+1838:           }
+1839:         }
+1840:       }
+1841:       productId ??=
+1842:           RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
+1843:       if (productId == null) return '未找到该商品';
+1844: 
+1845:       // 3. FindProduct 获取完整数据
+1846:       final findUri = Uri.parse('$baseUrl/Product/FindProduct');
+1847:       final findReq = await _httpClient.postUrl(findUri);
+1848:       findReq.headers.set('User-Agent', _ua);
+1849:       findReq.headers.set('Accept', 'application/json, text/javascript, */*');
+1850:       findReq.headers.set('Referer', '$baseUrl/Product/Manage');
+1851:       findReq.headers.set('Origin', baseUrl);
+1852:       findReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+1853:       findReq.headers.set('Content-Type',
+1854:           'application/x-www-form-urlencoded; charset=UTF-8');
+1855:       findReq.headers.set('Cookie', cookie);
+1856:       findReq.followRedirects = false;
+1857:       findReq.write('productId=$productId');
+1858:       final findResp = await findReq.close().timeout(const Duration(seconds: 15));
+1859:       final findBody = await _readBody(findResp);
+1860: 
+1861:       if (findResp.statusCode != 200) {
+1862:         return '获取商品数据失败 (HTTP ${findResp.statusCode})';
+1863:       }
+1864: 
+1865:       Map<String, dynamic> findData;
+1866:       try {
+1867:         findData = jsonDecode(findBody) as Map<String, dynamic>;
+1868:       } catch (_) {
+1869:         return '商品数据解析失败';
+1870:       }
+1871: 
+1872:       final product = findData['product'] as Map<String, dynamic>?;
+1873:       if (product == null) return '商品数据为空';
+1874: 
+1875:       // 4. 合并记录：统一写入商品描述，同类型记录替换一行，无则追加，保持三行
+1876:       const fieldName = 'description';
+1877:       final now = DateTime.now();
+1878:       final dateStr =
+1879:           '${now.year}.${now.month.toString().padLeft(2, '0')}.${now.day.toString().padLeft(2, '0')}';
+1880:       final newLine = '$dateStr $operatorName：$actionLabel';
+1881:       final lines = ((product[fieldName] as String?) ?? '')
+1882:           .split('\n')
+1883:           .map((l) => l.trimRight())
+1884:           .toList();
+1885:       // 库存兼容旧行「修改商品库存」：任一写法命中都替换为「更新库存」
+1886:       final idx = actionLabel == '更新库存'
+1887:           ? lines.indexWhere(
+1888:               (l) => l.contains('更新库存') || l.contains('修改商品库存'))
+1889:           : lines.indexWhere((l) => l.contains(actionLabel));
+1890:       if (idx >= 0) {
+1891:         lines[idx] = newLine;
+1892:       } else {
+1893:         lines.add(newLine);
+1894:       }
+1895:       product[fieldName] =
+1896:           lines.where((l) => l.trim().isNotEmpty).join('\n');
+1897: 
+1898:       // 5. SaveProduct 保存
+1899:       final productJson = jsonEncode(product);
+1900:       final saveData = 'userId=$userId&productJson=${Uri.encodeComponent(productJson)}';
+1901: 
+1902:       final saveUri = Uri.parse('$baseUrl/Product/SaveProduct');
+1903:       final saveReq = await _httpClient.postUrl(saveUri);
+1904:       saveReq.headers.set('User-Agent', _ua);
+1905:       saveReq.headers.set('Accept', 'application/json, text/javascript, */*');
+1906:       saveReq.headers.set('Referer', '$baseUrl/Product/Manage');
+1907:       saveReq.headers.set('Origin', baseUrl);
+1908:       saveReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+1909:       saveReq.headers.set('Content-Type',
+1910:           'application/x-www-form-urlencoded; charset=UTF-8');
+1911:       saveReq.headers.set('Cookie', cookie);
+1912:       saveReq.followRedirects = false;
+1913:       saveReq.write(saveData);
+1914:       final saveResp = await saveReq.close().timeout(const Duration(seconds: 15));
+1915:       final saveBody = await _readBody(saveResp);
+1916: 
+1917:       if (saveResp.statusCode != 200) {
+1918:         return '保存失败 (HTTP ${saveResp.statusCode})';
+1919:       }
+1920: 
+1921:       try {
+1922:         final saveResult = jsonDecode(saveBody) as Map<String, dynamic>;
+1923:         if (saveResult['successed'] == true) {
+1924:           return null; // 成功
+1925:         }
+1926:         return saveResult['msg'] as String? ?? '保存失败';
+1927:       } catch (_) {
+1928:         return '保存响应异常';
+1929:       }
+1930:     } catch (e) {
+1931:       return '${store.name} 更新描述异常：${e.toString()}';
+1932:     }
+1933:   }
+1934: 
+1935:   // ==================== 供货商 UID 缓存（静默获取） ====================
+1936: 
+1937:   /// 仅本地判断某门店当前是否有可用 Cookie（不发 HTTP 请求），
+1938:   /// 供照片队列在“等待登录”状态下检测登录恢复。
+1939:   Future<bool> hasSessionCookie(StoreConfig store) async {
+1940:     try {
+1941:       final cookie = await _sessionManager.getCookie(store.storeKey);
+1942:       return cookie != null && cookie.isNotEmpty;
+1943:     } catch (_) {
+1944:       return false;
+1945:     }

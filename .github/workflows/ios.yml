@@ -1,0 +1,43 @@
+name: iOS Build v1.0.12
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    env:
+      PUB_HOSTED_URL: https://pub.flutter-io.cn
+      FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: "3.41.2"
+          cache: true
+      - run: flutter pub get
+      - name: Build iOS
+        run: |
+          set -o pipefail
+          flutter build ios --release --no-codesign 2>&1 | tee build_ios.log
+      - name: Upload iOS build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-log
+          path: build_ios.log
+          if-no-files-found: ignore
+          retention-days: 3
+      - run: |
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -r -y cash-carry-v1.0.12-ios-unsigned.ipa Payload/
+          ls -la cash-carry-v1.0.12-ios-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cash-carry-v1.0.12-ios-unsigned
+          path: cash-carry-v1.0.12-ios-unsigned.ipa
+          retention-days: 3

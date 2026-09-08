@@ -1,0 +1,91 @@
+380:             ),
+381:           ],
+382:         ),
+383:       ),
+384:     );
+385: 
+386:     if (source == null) return;
+387: 
+388:     try {
+389:       final picker = ImagePicker();
+390:       final picked = await picker.pickImage(source: source, maxWidth: 1200, maxHeight: 1200);
+391:       if (picked == null || !mounted) return;
+392: 
+393:       // 进入裁剪页面
+394:       final croppedPath = await Navigator.of(context).push<String>(
+395:         MaterialPageRoute(builder: (_) => CropPage(imagePath: picked.path)),
+396:       );
+397:       if (!mounted) return;
+398:       if (croppedPath != null) {
+399:         setState(() => _imageFile = File(croppedPath));
+400:         // 用户手动上传的新图片 → 提交补货后同步到银豹（覆盖旧图）
+401:         _imageFromUser = true;
+402:       }
+403:       // 裁剪页面返回后延后收键盘，等路由动画完成
+404:       WidgetsBinding.instance.addPostFrameCallback((_) {
+405:         FocusManager.instance.primaryFocus?.unfocus();
+406:       });
+407:     } catch (e) {
+408:       if (mounted) _showMsg('获取图片失败：$e');
+409:     }
+410:   }
+411: 
+412:   Future<void> _submit() async {
+413:     if (!_formKey.currentState!.validate()) return;
+414:     if (_selectedShop == null || _selectedShop!.isEmpty) {
+415:       _showMsg('请填写供货商');
+416:       return;
+417:     }
+418:     if (_imageFile == null) {
+419:       _showMsg('请拍照上传照片');
+420:       return;
+421:     }
+422:     // 检查操作员姓名
+423:     if (widget.service.operatorName.isEmpty) {
+424:       await _askOperatorName();
+425:     }
+426: 
+427:     setState(() => _submitting = true);
+428:     try {
+429:       final imageBytes = await _imageFile!.readAsBytes();
+430:       final ok = await widget.service.submitReplenish(
+431:         shopName: _selectedShop!,
+432:         barcode: _barcodeCtrl.text,
+433:         quantity: _qtyCtrl.text.trim(),
+434:         desc: _descCtrl.text,
+435:         imageBytes: imageBytes,
+436:         imageName: 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg',
+437:       );
+438: 
+439:       if (mounted) {
+440:         // 银豹同步（不阻断补货流程）：供货商即时同步；新照片改走后台队列
+441:         // 补货服务器断线不影响银豹，无论提交成败都执行
+442:         final syncMsgs = <String>[];
+443:         final originalSupplier = _originalSupplier?.trim() ?? '';
+444:         final currentSupplier = _selectedShop?.trim() ?? '';
+445:         final supplierChanged = originalSupplier.isNotEmpty &&
+446:             currentSupplier.isNotEmpty &&
+447:             currentSupplier != originalSupplier;
+448:         final imageChanged = _imageFromUser && _imageFile != null;
+449:         String? supplierErr;
+450:         if (supplierChanged) {
+451:           supplierErr = await _syncSupplierToPospal(currentSupplier);
+452:           syncMsgs.add((supplierErr == null || supplierErr.isEmpty)
+453:               ? '供货商已同步到银豹'
+454:               : '供货商同步失败：$supplierErr');
+455:         }
+456:         if (imageChanged) {
+457:           try {
+458:             final imgBytes = await _imageFile!.readAsBytes();
+459:             final stores =
+460:                 PhotoQueueService.photoTargetStores(widget.configs ?? []);
+461:             await PhotoQueueService.instance.enqueue(
+462:               type: PhotoJobType.restock,
+463:               barcode: _barcodeCtrl.text,
+464:               productName: _productName ?? '',
+465:               productUid: _productUid,
+466:               imageBytes: imgBytes,
+467:               opName: widget.service.operatorName.trim(),
+468:               writeDesc: true,
+469:               stores: stores,
+470:             );

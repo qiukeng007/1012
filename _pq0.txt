@@ -1,0 +1,148 @@
+1: /// 照片后台队列：提交照片后立即返回，App 后台按顺序逐店处理。
+2: /// 失败最多重试 [maxAttempts] 次（带退避）；未登录不计次数并等待登录后继续；
+3: /// 任务持久化，退出登录/杀 App 后仍保留；完成后记录写入 history，
+4: /// 配置页可查看逐店/逐步耗时并手动重试。
+5: library;
+6: 
+7: import 'dart:async';
+8: import 'dart:convert';
+9: import 'dart:io';
+10: import 'package:flutter/foundation.dart';
+11: import 'package:image/image.dart' as img;
+12: import 'package:path_provider/path_provider.dart';
+13: import '../models/store_config.dart';
+14: import 'product_image_cache.dart';
+15: import 'query_service.dart';
+16: 
+17: /// 照片任务来源
+18: enum PhotoJobType { add, restock, sync }
+19: 
+20: extension PhotoJobTypeX on PhotoJobType {
+21:   String get label {
+22:     switch (this) {
+23:       case PhotoJobType.add:
+24:         return '新增照片';
+25:       case PhotoJobType.restock:
+26:         return '补货照片';
+27:       case PhotoJobType.sync:
+28:         return '同步照片';
+29:     }
+30:   }
+31: }
+32: 
+33: /// 任务状态
+34: enum PhotoJobStatus {
+35:   pending,
+36:   processing,
+37:   success,
+38:   partial,
+39:   failed,
+40:   superseded,
+41:   waitingLogin,
+42: }
+43: 
+44: extension PhotoJobStatusX on PhotoJobStatus {
+45:   String get label {
+46:     switch (this) {
+47:       case PhotoJobStatus.pending:
+48:         return '排队中';
+49:       case PhotoJobStatus.processing:
+50:         return '处理中';
+51:       case PhotoJobStatus.success:
+52:         return '成功';
+53:       case PhotoJobStatus.partial:
+54:         return '部分成功';
+55:       case PhotoJobStatus.failed:
+56:         return '已放弃';
+57:       case PhotoJobStatus.superseded:
+58:         return '被取代';
+59:       case PhotoJobStatus.waitingLogin:
+60:         return '等待登录';
+61:     }
+62:   }
+63: 
+64:   bool get isFinished =>
+65:       this == PhotoJobStatus.success ||
+66:       this == PhotoJobStatus.partial ||
+67:       this == PhotoJobStatus.failed ||
+68:       this == PhotoJobStatus.superseded;
+69: 
+70:   bool get canRetry =>
+71:       this == PhotoJobStatus.partial || this == PhotoJobStatus.failed;
+72: }
+73: 
+74: /// 单步耗时记录
+75: class PhotoStep {
+76:   final String name;
+77:   final int ms;
+78:   final String? detail;
+79:   const PhotoStep({required this.name, required this.ms, this.detail});
+80: 
+81:   Map<String, dynamic> toJson() => {
+82:         'name': name,
+83:         'ms': ms,
+84:         'detail': detail,
+85:       };
+86: 
+87:   factory PhotoStep.fromJson(Map<String, dynamic> json) => PhotoStep(
+88:         name: json['name'] as String? ?? '',
+89:         ms: (json['ms'] as num?)?.toInt() ?? 0,
+90:         detail: json['detail'] as String?,
+91:       );
+92: }
+93: 
+94: /// 单店处理结果
+95: class PhotoStoreResult {
+96:   final String storeKey;
+97:   final String storeName;
+98:   final String status; // success / failed / waitingLogin
+99:   final String? imageUrl;
+100:   final String? error;
+101:   final List<PhotoStep> steps;
+102:   final int wallMs;
+103:   const PhotoStoreResult({
+104:     required this.storeKey,
+105:     required this.storeName,
+106:     required this.status,
+107:     this.imageUrl,
+108:     this.error,
+109:     this.wallMs = 0,
+110:     this.steps = const [],
+111:   });
+112: 
+113:   String get statusText {
+114:     switch (status) {
+115:       case 'success':
+116:         return '成功';
+117:       case 'waitingLogin':
+118:         return '未登录';
+119:       default:
+120:         return '失败';
+121:     }
+122:   }
+123: 
+124:   Map<String, dynamic> toJson() => {
+125:         'storeKey': storeKey,
+126:         'storeName': storeName,
+127:         'status': status,
+128:         'imageUrl': imageUrl,
+129:         'error': error,
+130:         'steps': steps.map((e) => e.toJson()).toList(),
+131:         'wallMs': wallMs,
+132:       };
+133: 
+134:   factory PhotoStoreResult.fromJson(Map<String, dynamic> json) =>
+135:       PhotoStoreResult(
+136:         storeKey: json['storeKey'] as String? ?? '',
+137:         storeName: json['storeName'] as String? ?? '',
+138:         status: json['status'] as String? ?? 'failed',
+139:         imageUrl: json['imageUrl'] as String?,
+140:         error: json['error'] as String?,
+141:         steps: ((json['steps'] as List?) ?? const [])
+142:             .map((e) => PhotoStep.fromJson(e as Map<String, dynamic>))
+143:             .toList(),
+144:         wallMs: (json['wallMs'] as num?)?.toInt() ?? 0,
+145:       );
+146: }
+147: 
+148: /// 队列完成事件（供页面刷新图片 / 角标）

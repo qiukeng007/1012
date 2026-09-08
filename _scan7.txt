@@ -1,0 +1,99 @@
+4460: if (editProduct.colorProductImages[selectedItem.name] && editProduct.colorProductImages[selectedItem.name].length > 0 && editProduct.colorProductImages[selectedItem.name][0].path) {
+4461: imgSrc = pospal.formatSmallImageUrl(imageDomain + editProduct.colorProductImages[selectedItem.name][0].path);
+5061: colorProductImages: null,
+6162: if (result.colorProductImages) _this.colorProductImages = result.colorProductImages;
+6440: this.colorProductImages = {};
+6492: if (product.productimages != null && product.productimages.length > 0) {
+6493: var arr = $.grep(product.productimages, function (pi, i) {
+6498: var imgPath = pospal.formatSmallImageUrl(imageDomain + arr[0].path);
+6798: editImages.buildImgsUI(product.productimages);
+7311: var productImages = [{ "isCover": true, "path": result.imgUrl }];
+7313: var imgPath = pospal.formatSmallImageUrl(imageDomain + productImages[0].path);
+7320: editImages.buildImgsUI(productImages);
+8401: product.productimages = [];
+8402: $("#editImageDiv .imgUl li[fileId='']").each(function (i, item) {
+8406: product.productimages.push(productImage);
+8574: if (_this.colorProductImages && _this.colorProductImages[product.attribute1]) {
+8575: product.productimages = _this.colorProductImages[product.attribute1];
+8578: product.productimages = [];
+8633: $("#editImageDiv .imgUl li[fileId='']").each(function (i, item) {
+9501: $("#editImageDiv .imgUl").html("");
+9502: $("#editImageDiv .imgUl").width(0);
+9536: var liNum = $("#editImageDiv .imgUl li").length;
+9549: var li = $("<li/>").attr("fileId", files[i].id).appendTo($("#editImageDiv .imgUl"));
+9564: $("#editImageDiv .imgUl li[fileId=" + files[i].id + "]").find("img").attr("src", imgsrc);
+9565: $("#editImageDiv .imgUl li[fileId=" + files[i].id + "]").find("h1").remove();
+9575: $("#editImageDiv .imgUl li[fileId=" + file.id + "]").find(".progress div").css("width", file.percent + "%");
+9585: var imagePath = pospal.formatSmallImageUrl(imageDomain + result.msg);
+9588: var li = $("#editImageDiv .imgUl li[fileId=" + file.id + "]");
+9622: var firstLi = $("#editImageDiv .imgUl li[fileId='']").eq(0);
+9639: var liNum = $("#editImageDiv .imgUl li").length;
+9640: $("#editImageDiv .imgUl").width(liNum * 160);
+9659: $("#editImageDiv .imgUl li .imgCover").remove();
+9688: var coverImg = $("#editImageDiv .imgUl li .imgCover");
+9703: var firstLi = $("#editImageDiv .imgUl li[fileId='']").eq(0);
+9720: var firstLi = $("#editImageDiv .imgUl li[fileId='']").eq(0);
+9743: var liNum = $("#editImageDiv .imgUl li").length;
+9744: $("#editImageDiv .imgUl").width(liNum * 160);
+9747: buildImgsUI: function (productImages) {
+9750: if (productImages != null && productImages.length > 0) {
+9751: for (var i = 0; i < productImages.length; i++) {
+9752: var pi = productImages[i];
+9754: var li = $("<li/>").attr("fileId", "").data("imagePath", pi.path).appendTo($("#editImageDiv .imgUl"));
+9756: var img = $("<img style='width:140px; height:140px;' />").attr("src", pospal.formatSmallImageUrl(imageDomain + pi.path)).appendTo(imgBox);
+9778: $("#editImageDiv .imgUl").width(productImages.length * 160);
+9792: var length = $("#editImageDiv .imgUl li[fileId='']").length;
+9887: var length = $("#editImageDiv .imgUl li[fileId='']").length;
+9888: $("#editImageDiv .imgUl li[fileId='']").each(function (i, item) {
+9892: productImage.imageSrc = pospal.formatSmallImageUrl(imageDomain + productImage.path);
+9947: $("#editImageDiv .imgUl li[fileId='']").each(function (j, li) {
+9959: $li.find("img").attr("src", pospal.formatSmallImageUrl(imageDomain + result.imagePath));
+12048: updateProductImageSize: function () {
+12093: this.updateProductImageSize();
+12210: this.updateProductImageSize();
+12336: $("#batchEditImageDiv .imgUl").html("");
+12337: $("#batchEditImageDiv .imgUl").width(0);
+12374: var liNum = $("#batchEditImageDiv .imgUl li").length;
+12411: var li = $("<li/>").attr("fileId", file.id).appendTo($("#batchEditImageDiv .imgUl"));
+12426: $("#batchEditImageDiv .imgUl li[fileId=" + file.id + "]").find("img").attr("src", imgsrc);
+12427: $("#batchEditImageDiv .imgUl li[fileId=" + file.id + "]").find("h1").remove();
+12437: $("#batchEditImageDiv .imgUl li[fileId=" + file.id + "]").find(".progress div").css("width", file.percent + "%");
+12447: var imagePath = pospal.formatSmallImageUrl(imageDomain + result.msg);
+12450: var li = $("#batchEditImageDiv .imgUl li[fileId=" + file.id + "]");
+12485: var liNum = $("#batchEditImageDiv .imgUl li").length;
+12486: $("#batchEditImageDiv .imgUl").width(liNum * 160);
+12511: var liNum = $("#batchEditImageDiv .imgUl li").length;
+12512: $("#batchEditImageDiv .imgUl").width(liNum * 160);
+12533: var productImages = [];
+12534: if (editProduct.colorProductImages && editProduct.colorProductImages[colorName]) {
+12535: productImages = editProduct.colorProductImages[colorName];
+12537: this.buildImgsUI(productImages);
+12546: $("#editMulColorImageDiv .imgUl").html("");
+12547: $("#editMulColorImageDiv .imgUl").width(0);
+12576: var liNum = $("#editMulColorImageDiv .imgUl li").length;
+12589: var li = $("<li/>").attr("fileId", files[i].id).appendTo($("#editMulColorImageDiv .imgUl"));
+12604: $("#editMulColorImageDiv .imgUl li[fileId=" + files[i].id + "]").find("img").attr("src", imgsrc);
+12605: $("#editMulColorImageDiv .imgUl li[fileId=" + files[i].id + "]").find("h1").remove();
+12615: $("#editMulColorImageDiv .imgUl li[fileId=" + file.id + "]").find(".progress div").css("width", file.percent + "%");
+12624: var imagePath = pospal.formatSmallImageUrl(imageDomain + result.msg);
+12627: var li = $("#editMulColorImageDiv .imgUl li[fileId=" + file.id + "]");
+12658: var firstLi = $("#editMulColorImageDiv .imgUl li[fileId='']").eq(0);
+12674: var liNum = $("#editMulColorImageDiv .imgUl li").length;
+12675: $("#editMulColorImageDiv .imgUl").width(liNum * 160);
+12693: $("#editMulColorImageDiv .imgUl li .imgCover").remove();
+12702: var coverImg = $("#editMulColorImageDiv .imgUl li .imgCover");
+12715: var firstLi = $("#editMulColorImageDiv .imgUl li[fileId='']").eq(0);
+12723: buildImgsUI: function (productImages) {
+12726: if (productImages != null && productImages.length > 0) {
+12727: for (var i = 0; i < productImages.length; i++) {
+12728: var pi = productImages[i];
+12730: var li = $("<li/>").attr("fileId", "").appendTo($("#editMulColorImageDiv .imgUl"));
+12732: var img = $("<img style='width:140px; height:140px;' />").attr("src", pospal.formatSmallImageUrl(imageDomain + pi.path)).appendTo(imgBox).attr("data-caption", "").attr("data-group", "group_" + colorName).attr("data-src", pospal.formatSmallImageUrl(imageDomain + pi.path).replace("_200x200", ""));
+12790: var productimages = [];
+12791: $("#editMulColorImageDiv .imgUl li[fileId='']").each(function (i, item) {
+12795: productimages.push(productImage);
+12797: return productimages;
+12802: editProduct.colorProductImages[colorName] = this.buildImages();
+14251: var imageUrl = imageDomain + product.imgUrl;
+14252: $('<td class="productImage tdAlignCenter hasData"><img data-caption="' + product.name + '" data-group="stdImage_' + product.barcode + '" data-src="' + imageUrl + '" src="' + imageUrl + '" /></td>').appendTo($tr);
+14255: $('<td class="productImage tdAlignCenter noData"><img src= "' + (imageDomain + "productImages/0/default_200x200.png") + '" /></td>').appendTo($tr);

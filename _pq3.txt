@@ -1,0 +1,156 @@
+845: class PhotoJob {
+846:   final String id;
+847:   final PhotoJobType type;
+848:   final String barcode;
+849:   final String productName;
+850:   final String? productUid;
+851:   final String opName;
+852:   final String opDesc;
+853:   final bool writeDesc;
+854:   final DateTime createdAt;
+855:   PhotoJobStatus status;
+856:   int attempts;
+857:   int nextAttemptAt;
+858:   bool superseded;
+859:   String? imageFile;
+860:   String? sourceUrl;
+861:   List<StoreConfig> stores;
+862:   List<PhotoStoreResult> results;
+863:   String? startedAt;
+864:   String? finishedAt;
+865:   int? totalMs;
+866: 
+867:   PhotoJob({
+868:     required this.id,
+869:     required this.type,
+870:     required this.barcode,
+871:     required this.productName,
+872:     this.productUid,
+873:     this.opName = '',
+874:     this.opDesc = '',
+875:     this.writeDesc = false,
+876:     required this.createdAt,
+877:     required this.status,
+878:     this.attempts = 0,
+879:     this.nextAttemptAt = 0,
+880:     this.superseded = false,
+881:     this.imageFile,
+882:     this.sourceUrl,
+883:     required this.stores,
+884:     this.results = const [],
+885:     this.startedAt,
+886:     this.finishedAt,
+887:     this.totalMs,
+888:   });
+889: 
+890:   String get elapsedText {
+891:     final ms = finishedAt == null
+892:         ? DateTime.now().difference(createdAt).inMilliseconds
+893:         : (totalMs ?? 0);
+894:     if (ms < 1000) return '${ms} 毫秒';
+895:     if (ms < 60000) return '${(ms / 1000).toStringAsFixed(1)} 秒';
+896:     return '${(ms / 60000).toStringAsFixed(1)} 分钟';
+897:   }
+898: 
+899:   bool get canRetryNow {
+900:     if (!status.canRetry) return false;
+901:     return (imageFile != null) || (sourceUrl != null);
+902:   }
+903: 
+904:   Map<String, dynamic> toJson() => {
+905:         'id': id,
+906:         'type': type.name,
+907:         'barcode': barcode,
+908:         'productName': productName,
+909:         'productUid': productUid,
+910:         'opName': opName,
+911:         'opDesc': opDesc,
+912:         'writeDesc': writeDesc,
+913:         'createdAt': createdAt.toIso8601String(),
+914:         'status': status.name,
+915:         'attempts': attempts,
+916:         'nextAttemptAt': nextAttemptAt,
+917:         'superseded': superseded,
+918:         'imageFile': imageFile,
+919:         'sourceUrl': sourceUrl,
+920:         'stores': stores.map((e) => e.toJson()).toList(),
+921:         'results': results.map((e) => e.toJson()).toList(),
+922:         'startedAt': startedAt,
+923:         'finishedAt': finishedAt,
+924:         'totalMs': totalMs,
+925:       };
+926: 
+927:   factory PhotoJob.fromJson(Map<String, dynamic> json) => PhotoJob(
+928:         id: json['id'] as String? ?? '',
+929:         type: PhotoJobType.values.firstWhere(
+930:             (e) => e.name == (json['type'] as String? ?? 'add'),
+931:             orElse: () => PhotoJobType.add),
+932:         barcode: json['barcode'] as String? ?? '',
+933:         productName: json['productName'] as String? ?? '',
+934:         productUid: json['productUid'] as String?,
+935:         opName: json['opName'] as String? ?? '',
+936:         opDesc: json['opDesc'] as String? ?? '',
+937:         writeDesc: json['writeDesc'] as bool? ?? false,
+938:         createdAt:
+939:             DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+940:                 DateTime.now(),
+941:         status: PhotoJobStatus.values.firstWhere(
+942:             (e) => e.name == (json['status'] as String? ?? 'pending'),
+943:             orElse: () => PhotoJobStatus.pending),
+944:         attempts: (json['attempts'] as num?)?.toInt() ?? 0,
+945:         nextAttemptAt: (json['nextAttemptAt'] as num?)?.toInt() ?? 0,
+946:         superseded: json['superseded'] as bool? ?? false,
+947:         imageFile: json['imageFile'] as String?,
+948:         sourceUrl: json['sourceUrl'] as String?,
+949:         stores: ((json['stores'] as List?) ?? const [])
+950:             .map((e) => StoreConfig.fromJson(e as Map<String, dynamic>))
+951:             .toList(),
+952:         results: ((json['results'] as List?) ?? const [])
+953:             .map((e) => PhotoStoreResult.fromJson(e as Map<String, dynamic>))
+954:             .toList(),
+955:         startedAt: json['startedAt'] as String?,
+956:         finishedAt: json['finishedAt'] as String?,
+957:         totalMs: (json['totalMs'] as num?)?.toInt(),
+958:       );
+959: }
+960: 
+961: 
+962: 
+963: 
+964: 
+965: 
+966: 
+967: 
+968: 
+969: 
+970: 
+971: 
+972: 
+973: 
+974: 
+975: 
+976: 
+977: 
+978: 
+979: 
+980: 
+981: 
+982: 
+983: 
+984: 
+985: 
+986: 
+987: 
+988: 
+989: 
+990: 
+991: 
+992: 
+993: 
+994: 
+995: 
+996: 
+997: 
+998: 
+999: 
+1000: 

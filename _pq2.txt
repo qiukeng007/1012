@@ -1,0 +1,183 @@
+148: /// 队列完成事件（供页面刷新图片 / 角标）
+149: class PhotoJobEvent {
+150:   final String jobId;
+151:   final PhotoJobType type;
+152:   final PhotoJobStatus status;
+153:   final String barcode;
+154:   final String? productUid;
+155:   final String? imageUrl;
+156:   final int successCount;
+157:   final int totalStores;
+158:   final List<String> failedStores;
+159:   final int? totalMs;
+160:   const PhotoJobEvent({
+161:     required this.jobId,
+162:     required this.type,
+163:     required this.status,
+164:     required this.barcode,
+165:     this.productUid,
+166:     this.imageUrl,
+167:     required this.successCount,
+168:     required this.totalStores,
+169:     this.failedStores = const [],
+170:     this.totalMs,
+171:   });
+172: 
+173:   bool get fullSuccess =>
+174:       status == PhotoJobStatus.success && failedStores.isEmpty;
+175: }
+176: /// 照片后台队列服务（单例）
+177: class PhotoQueueService {
+178:   PhotoQueueService._();
+179: 
+180:   static final PhotoQueueService instance = PhotoQueueService._();
+181: 
+182:   /// 网络/银豹错误最多重试次数，超过后放弃并记录（未登录不计次数）
+183:   static const int maxAttempts = 5;
+184: 
+185:   /// 配置页日志最多保留条数
+186:   static const int historyCap = 200;
+187: 
+188:   static const List<int> _backoffMs = [5000, 15000, 60000, 60000];
+189: 
+190:   final _PhotoQueueNotifier _notifier = _PhotoQueueNotifier();
+191:   final StreamController<PhotoJobEvent> _events =
+192:       StreamController<PhotoJobEvent>.broadcast();
+193:   QueryService? _queryService;
+194:   bool _pumping = false;
+195:   int _pendingCount = 0;
+196:   int _seq = 0;
+197:   /// 当前是否有任务正在上传（驱动首页“运行中”转圈动画）
+198:   bool _processingActive = false;
+199:   /// 运行中已被新任务取代的任务 id：worker 内存态可能落后于磁盘标记，
+200:   /// 需以此集合为准，避免旧任务继续跑完剩余门店。
+201:   final Set<String> _cancelledIds = <String>{};
+202: 
+203:   ChangeNotifier get notifier => _notifier;
+204:   Stream<PhotoJobEvent> get events => _events.stream;
+205:   int get pendingCount => _pendingCount;
+206:   bool get isProcessingActive => _processingActive;
+207: 
+208:   void addListener(void Function() l) => _notifier.addListener(l);
+209:   void removeListener(void Function() l) => _notifier.removeListener(l);
+210: 
+211:   /// 首页加载完成后绑定 QueryService 并启动消费
+212:   Future<void> attach(QueryService qs) async {
+213:     _queryService = qs;
+214:     await refreshCount();
+215:     start();
+216:   }
+217: 
+218:   Future<void> start() async {
+219:     if (_pumping) return;
+220:     _pumping = true;
+221:     try {
+222:       await _pumpLoop();
+223:     } finally {
+224:       _pumping = false;
+225:     }
+226:   }
+227: 
+228:   /// 照片提交的目标门店：总账号模式(存在门店ID)取全部有效门店；
+229:   /// 门店单独登录模式(1011-1)取已登录有效门店。
+230:   static List<StoreConfig> photoTargetStores(List<StoreConfig> configs) {
+231:     final hasMaster = configs.any((c) => c.storeId.isNotEmpty);
+232:     if (hasMaster) {
+233:       return configs.where((c) => c.storeId.isNotEmpty || c.isValid).toList();
+234:     }
+235:     return configs.where((c) => c.isValid).toList();
+236:   }
+237: 
+238:   // ==================== 入队 ====================
+239: 
+240:   /// 入队一张照片任务。[imageBytes] 与 [sourceUrl] 二选一：
+241:   /// 新照片传字节（本地压缩后落盘）；同步已有照片传 CDN 原图地址（Worker 下载）。
+242:   Future<PhotoJob> enqueue({
+243:     required PhotoJobType type,
+244:     required String barcode,
+245:     required String productName,
+246:     String? productUid,
+247:     List<int>? imageBytes,
+248:     String? sourceUrl,
+249:     String opName = '',
+250:     bool writeDesc = false,
+251:     required List<StoreConfig> stores,
+252:   }) async {
+253:     if (stores.isEmpty) {
+254:       throw StateError('没有可同步的有效门店');
+255:     }
+256:     final code = barcode.trim();
+257:     if (code.isEmpty) throw StateError('条码为空');
+258:     if ((imageBytes == null) == (sourceUrl == null)) {
+259:       throw StateError('必须且只能提供 imageBytes 或 sourceUrl 之一');
+260:     }
+261: 
+262:     // 同商品(条码+uid)合并：丢弃旧任务只跑最新
+263:     final oldJobs = await _loadQueue();
+264:     for (final dup in oldJobs) {
+265:       if (dup.barcode != code ||
+266:           (dup.productUid ?? '') != (productUid ?? '') ||
+267:           dup.status.isFinished) {
+268:         continue;
+269:       }
+270:       if (dup.status == PhotoJobStatus.processing) {
+271:         dup.superseded = true;
+272:         _cancelledIds.add(dup.id);
+273:         await _saveQueueJob(dup);
+274:       } else {
+275:         await _deleteImage(dup);
+276:         await _deleteQueueFile(dup.id);
+277:       }
+278:     }
+279: 
+280:     final now = DateTime.now();
+281:     final id =
+282:         '${now.millisecondsSinceEpoch}_${(_seq++).toString().padLeft(3, '0')}';
+283:     String? fileName;
+284:     if (imageBytes != null) {
+285:       final compressed = compressForUpload(Uint8List.fromList(imageBytes));
+286:       fileName = '$id.jpg';
+287:       final file =
+288:           File('${(await _imgDir()).path}${Platform.pathSeparator}$fileName');
+289:       await file.writeAsBytes(compressed, flush: true);
+290:     }
+291: 
+292:     final job = PhotoJob(
+293:       id: id,
+294:       type: type,
+295:       barcode: code,
+296:       productName: productName,
+297:       productUid: productUid,
+298:       opName: opName,
+299:       opDesc: _actionDesc(type),
+300:       writeDesc: writeDesc,
+301:       createdAt: now,
+302:       status: PhotoJobStatus.pending,
+303:       imageFile: fileName,
+304:       sourceUrl: sourceUrl,
+305:       stores: List.of(stores),
+306:     );
+307:     await _saveQueueJob(job);
+308:     await refreshCount();
+309:     _notify();
+310:     start();
+311:     return job;
+312:   }
+313: 
+314:   static String _actionDesc(PhotoJobType type) {
+315:     switch (type) {
+316:       case PhotoJobType.add:
+317:       case PhotoJobType.restock:
+318:         return '更新照片';
+319:       case PhotoJobType.sync:
+320:         return '同步照片';
+321:     }
+322:   }
+323: 
+324:   // ==================== 查询 ====================
+325: 
+326:   Future<List<PhotoJob>> pendingJobs() => _loadQueue();
+327: 
+328:   Future<List<PhotoJob>> historyJobs() => _loadHistory();
+329: 
+330:   /// 该商品(条码+uid)是否已有排队/处理中的任务

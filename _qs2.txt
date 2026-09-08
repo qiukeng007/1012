@@ -1,0 +1,109 @@
+2309: 
+2310:   /// 按条码搜索定位该门店的商品ID（同一条码多商品时优先按 uid 精准匹配）
+2311:   Future<(String?, String?)> _locateProductId(
+2312:     String baseUrl,
+2313:     String cookie,
+2314:     String userId,
+2315:     String code,
+2316:     String? productUid,
+2317:   ) async {
+2318:     final pageData = _encodeForm({
+2319:       'userId': userId,
+2320:       'enable': '1',
+2321:       'productTagUidsJson': '[]',
+2322:       'keyword': code,
+2323:       'groupBySpu': 'false',
+2324:       'categorysJson': '[]',
+2325:       'supplierUid': '',
+2326:       'categoryType': '',
+2327:       'pageIndex': '1',
+2328:       'pageSize': '20',
+2329:       'orderColumn': '',
+2330:       'asc': 'true',
+2331:     });
+2332: 
+2333:     final searchUri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
+2334:     final searchReq = await _httpClient.postUrl(searchUri);
+2335:     searchReq.headers.set('User-Agent', _ua);
+2336:     searchReq.headers.set('Accept', 'application/json, text/javascript, */*');
+2337:     searchReq.headers.set('Referer', '$baseUrl/Product/Manage');
+2338:     searchReq.headers.set('Origin', baseUrl);
+2339:     searchReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+2340:     searchReq.headers.set('Content-Type',
+2341:         'application/x-www-form-urlencoded; charset=UTF-8');
+2342:     searchReq.headers.set('Cookie', cookie);
+2343:     searchReq.followRedirects = false;
+2344:     searchReq.write(pageData);
+2345:     final searchResp = await searchReq.close().timeout(const Duration(seconds: 15));
+2346:     final searchBody = await _readBody(searchResp);
+2347: 
+2348:     if (searchResp.statusCode != 200) {
+2349:       return ('搜索失败 (HTTP ${searchResp.statusCode})', null);
+2350:     }
+2351: 
+2352:     Map<String, dynamic> searchData;
+2353:     try {
+2354:       searchData = jsonDecode(searchBody) as Map<String, dynamic>;
+2355:     } catch (_) {
+2356:       return ('搜索返回格式异常', null);
+2357:     }
+2358: 
+2359:     final contentView = searchData['contentView'] as String? ?? '';
+2360:     // 优先按商品 uid 精准定位（同一条码多个商品时更新用户选中的那一个）
+2361:     String? locatedId;
+2362:     if (productUid != null && productUid.isNotEmpty) {
+2363:       final uidRowRegex = RegExp(
+2364:           r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>');
+2365:       for (final m in uidRowRegex.allMatches(contentView)) {
+2366:         if (m.group(2) == productUid) {
+2367:           locatedId = m.group(1);
+2368:           break;
+2369:         }
+2370:       }
+2371:     }
+2372:     locatedId ??=
+2373:         RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
+2374:     if (locatedId == null) return ('未找到该商品', null);
+2375:     return (null, locatedId);
+2376:   }
+2377: 
+2378:   /// 按商品ID 获取银豹商品详情（含旧图片列表 productimages[].id）
+2379:   Future<(String?, Map<String, dynamic>?)> _findProductData(
+2380:     String baseUrl,
+2381:     String cookie,
+2382:     String pid,
+2383:   ) async {
+2384:     final findUri = Uri.parse('$baseUrl/Product/FindProduct');
+2385:     final findReq = await _httpClient.postUrl(findUri);
+2386:     findReq.headers.set('User-Agent', _ua);
+2387:     findReq.headers.set('Accept', 'application/json, text/javascript, */*');
+2388:     findReq.headers.set('Referer', '$baseUrl/Product/Manage');
+2389:     findReq.headers.set('Origin', baseUrl);
+2390:     findReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+2391:     findReq.headers.set('Content-Type',
+2392:         'application/x-www-form-urlencoded; charset=UTF-8');
+2393:     findReq.headers.set('Cookie', cookie);
+2394:     findReq.followRedirects = false;
+2395:     findReq.write('productId=$pid');
+2396:     final findResp = await findReq.close().timeout(const Duration(seconds: 15));
+2397:     final findBody = await _readBody(findResp);
+2398: 
+2399:     if (findResp.statusCode != 200) {
+2400:       return ('获取商品数据失败 (HTTP ${findResp.statusCode})', null);
+2401:     }
+2402: 
+2403:     Map<String, dynamic> findData;
+2404:     try {
+2405:       findData = jsonDecode(findBody) as Map<String, dynamic>;
+2406:     } catch (_) {
+2407:       return ('商品数据解析失败', null);
+2408:     }
+2409:     final product = findData['product'] as Map<String, dynamic>?;
+2410:     return (null, product);
+2411:   }
+2412: 
+2413:   /// 替换商品图片：先删除银豹商品全部旧图，再上传新图
+2414:   /// 银豹支持一商品多张图片，仅上传新图不会优先显示，需先删除旧图再上传替换
+2415:   /// 返回 (error, imageUrl)：error 为 null 表示成功，imageUrl 为完整可显示的图片地址
+2416:   /// [onStep] 可选：上报各步骤耗时(name, 毫秒, detail)，供照片队列日志分析
+2417:   Future<(String?, String?)> replaceProductImage(

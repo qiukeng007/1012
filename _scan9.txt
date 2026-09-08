@@ -1,0 +1,146 @@
+=== 8390-8420 ===
+8390:             product.attribute2 = $("#edit_attribute2").val().trim();
+8391:             product.attribute3 = $("#edit_attribute3").val().trim();
+8392: 
+8393:         } else {
+8394:             product.attribute1 = $("#edit_attribute1").val().trim();
+8395:             product.attribute2 = $("#edit_attribute2").val().trim();
+8396:             product.attribute3 = $("#edit_attribute3").val().trim();
+8397:             product.attribute4 = $("#edit_attribute4").val().trim();
+8398:         }
+8399: 
+8400:         //图片
+8401:         product.productimages = [];
+8402:         $("#editImageDiv .imgUl li[fileId='']").each(function (i, item) {
+8403:             var productImage = {};
+8404:             productImage.path = $(item).data("imagePath");
+8405:             productImage.isCover = $(item).find(".imgCover").length > 0 ? true : false;
+8406:             product.productimages.push(productImage);
+8407:         });
+8408: 
+8409:         product.productTags = [];
+8410:         $("#edit_productTagList ul span").each(function (index, item) {
+8411:             product.productTags.push({ uid: $(item).attr("data-tagUid"), name: $(item).text() });
+8412:         });
+8413: 
+8414:         if (industryNumber == "102" || industryNumber == "114" || industryNumber == "115" || industryNumber == "112") {
+8415:             product.TasteMappingList = viewModel.TasteMappingList || [];
+8416:         }
+8417: 
+8418:         if (this.hasPluCode) {
+8419:             var pluCode = $("#edit_pluCode").length > 0 ? $("#edit_pluCode").val().trim() : "";
+8420:             if (pluCode.length > 0) {
+=== 9880-9965 ===
+9880:             doing.destroy();
+9881:         });
+9882:     },
+9883:     bindData: function () {
+9884:         var _this = this;
+9885:         var $widget = this.$container.find(".segmentationItemWidget").empty();
+9886:         var dtd = $.Deferred();
+9887:         var length = $("#editImageDiv .imgUl li[fileId='']").length;
+9888:         $("#editImageDiv .imgUl li[fileId='']").each(function (i, item) {
+9889:             var productImage = {};
+9890:             productImage.path = $(item).data("imagePath");
+9891:             productImage.isCover = $(item).find(".imgCover").length > 0 ? true : false;
+9892:             productImage.imageSrc = pospal.formatSmallImageUrl(imageDomain + productImage.path);
+9893:             var $item = $(template("segmentationItem_Template", productImage)).appendTo($widget);
+9894: 
+9895:             var img = new Image();
+9896:             img.crossOrigin = 'Anonymous';
+9897:             img.onload = function () {
+9898:                 try {
+9899:                     var canvas = document.createElement('canvas'),
+9900:                         ctx = canvas.getContext('2d');
+9901:                     canvas.height = img.naturalHeight;
+9902:                     canvas.width = img.naturalWidth;
+9903:                     ctx.drawImage(img, 0, 0);
+9904:                     var b64 = canvas.toDataURL('image/jpg');
+9905:                     if (b64) {
+9906:                         $item.data("base64", b64);
+9907:                     }
+9908:                     else {
+9909:                         $item.remove();
+9910:                     }
+9911:                 }
+9912:                 catch (ex) {
+9913:                     console.log(ex);
+9914:                     $item.remove();
+9915:                 }
+9916:                 if (i == length - 1) dtd.resolve();
+9917:             };
+9918:             img.onerror = function () {
+9919:                 $item.remove();
+9920:                 if (i == length - 1) dtd.resolve();
+9921:             };
+9922:             img.src = imageDomain + $item.attr("orignal-data") + "!/max/1280?not-from-cache-please";
+9923:         });
+9924:         $.when(dtd).then(function () {
+9925:             setTimeout(function () {
+9926:                 _this.loadSegmentationImages();
+9927:             }, 100);
+9928:         });
+9929:     },
+9930:     saveData: function () {
+9931:         var _this = this;
+9932:         var itemLength = this.$container.find(".segmentationItem.on").length;
+9933:         if (itemLength == 0) {
+9934:             new pospal.ui.msgBox({ content: "请先勾选图片", boxType: "toast", autoCloseSec: 1500 });
+9935:             return false;
+9936:         }
+9937:         var doing = new pospal.ui.loading(this.$container);
+9938:         var dtds = [];
+9939:         var errorMsgs = [];
+9940:         this.$container.find(".segmentationItem.on").each(function (i, item) {
+9941:             var $item = $(item);
+9942:             var $image = $item.find("img");
+9943:             var b64 = $image.attr("src");
+9944:             b64 = b64.replace(/^data:image\/?[A-z]*;base64,/, '');
+9945:             var orignalPath = $item.attr("orignal-data");
+9946:             var $li = null;
+9947:             $("#editImageDiv .imgUl li[fileId='']").each(function (j, li) {
+9948:                 if ($(li).data("imagePath") == orignalPath) {
+9949:                     $li = $(li);
+9950:                 }
+9951:             });
+9952:             dtds.push(pospal.ajax({
+9953:                 url: "/Product/SaveImageWithSegmentation",
+9954:                 data: { "userId": userSelector.getSelectedValue(), "imageBase64": b64, "productImageId": $li.data("imgId"), "forMulColorSize": $("#editArea").data("isMulColorSize") },
+9955:                 success: function (result) {
+9956:                     if (result.successed) {
+9957:                         if ($li) {
+9958:                             $li.data("imagePath", result.imagePath);
+9959:                             $li.find("img").attr("src", pospal.formatSmallImageUrl(imageDomain + result.imagePath));
+9960:                             if ($li.find(".imgCover").length > 0) {
+9961:                                 editImages.setCoverImgUI($li);
+9962:                             }
+9963:                         }
+9964:                     }
+9965:                     else {
+=== 7300-7325 ===
+7300:         var _this = this;
+7301:         var barcode = $("#edit_barcode").val().trim();
+7302:         if (barcode.length > 0) {
+7303:             pospal.ajax({
+7304:                 url: "/Product/GetSuggestProductName",
+7305:                 data: { barcode: barcode },
+7306:                 success: function (result) {
+7307:                     if (result.successed) {
+7308:                         $("#edit_productName").val(result.productName);
+7309:                         $("#edit_productName").keyup();
+7310:                         if (result.imgUrl) {
+7311:                             var productImages = [{ "isCover": true, "path": result.imgUrl }];
+7312: 
+7313:                             var imgPath = pospal.formatSmallImageUrl(imageDomain + productImages[0].path);
+7314:                             if ($(".defaultImage img").length > 0) {
+7315:                                 $(".defaultImage img").attr("src", imgPath);
+7316:                             } else {
+7317:                                 $("<img/>").attr("src", imgPath).appendTo($(".defaultImage"));
+7318:                             }
+7319:                             editImages.resetUI();
+7320:                             editImages.buildImgsUI(productImages);
+7321:                         }
+7322:                     }
+7323:                 },
+7324:                 complete: function () { }
+7325:             });

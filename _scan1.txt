@@ -1,0 +1,109 @@
+10120: storeIdRange: _this.storeIdRange,
+10124: onConfirm: function () {
+10127: isInint: function () { return sync.toUserInit; },
+10128: loadDataFunc: sync.loadSyncStore
+10131: sync.loadSyncStore();
+10134: confirmDelProductToStores: function (stores, barcode) {
+10137: boxType: "confirm",
+10139: confirmText: lang.tryGet("是"),
+10141: onConfirm: function () {
+10142: if (this.confirmValue) {
+10143: _this.bulidStoreList(stores, "del");
+10154: syncDelProductToStores: function () {
+10159: this.ajaxSyncToStores("/Product/DeleteStoreProduct", data, false);
+10162: confirmAddProductToStores: function (stores, product, fromUserId) {
+10165: boxType: "confirm",
+10167: confirmText: lang.tryGet("是"),
+10169: onConfirm: function () {
+10170: if (this.confirmValue) {
+10171: _this.bulidStoreList(stores, "add");
+10183: syncAddProductToStores: function () {
+10189: this.ajaxSyncToStores("/Product/CopyNewProductToStores", data, true);
+10192: confirmAddProductsToStores: function (stores, products, fromUserId, caseproducts, specProductOrders) {
+10195: boxType: "confirm",
+10197: confirmText: lang.tryGet("是"),
+10199: onConfirm: function () {
+10200: if (this.confirmValue) {
+10201: _this.bulidStoreList(stores, "add_mul");
+10212: syncAddProductsToStores: function () {
+10219: this.ajaxSyncToStores("/Product/CopyNewProductsToStores", data, true);
+10222: confirmAddMoreSpecProductsToStores: function (stores, products, fromUserId, caseproducts) {
+10225: boxType: "confirm",
+10227: confirmText: lang.tryGet("是"),
+10229: onConfirm: function () {
+10230: if (this.confirmValue) {
+10231: _this.bulidStoreList(stores, "add_morespec");
+10243: syncAddMoreSpecProductsToStores: function () {
+10250: this.ajaxSyncToStores("/Product/CopyNewMoreSpecProductsToStores", data, true);
+10253: confirmUpdateProductsToStores: function (stores, products, fromUserId, caseproducts, specProductOrders) {
+10256: boxType: "confirm",
+10258: confirmText: lang.tryGet("是"),
+10260: onConfirm: function () {
+10261: if (this.confirmValue) {
+10262: _this.bulidStoreList(stores, "update_mul");
+10273: syncUpdateProductsToStores: function () {
+10280: $("#syncDiv .attributeCheckBoxList div.checkBoxDiv.on").each(function (index, item) {
+10295: pospal.setCookie("syncUpdateProductAttributes", JSON.stringify(attributeList), 365 * 24);
+10296: this.ajaxSyncToStores("/Product/SyncUpdateProductsToStores", data, true);
+10299: confirmUpdateMoreSpecProductsToStores: function (stores, products, fromUserId, caseproducts, deleteProductBarcodes) {
+10302: boxType: "confirm",
+10304: confirmText: lang.tryGet("是"),
+10306: onConfirm: function () {
+10307: if (this.confirmValue) {
+10308: _this.bulidStoreList(stores, "update_morespec");
+10321: syncUpdateMoreSpecProductsToStores: function () {
+10328: $("#syncDiv .attributeCheckBoxList div.checkBoxDiv.on").each(function (index, item) {
+10344: pospal.setCookie("syncUpdateProductAttributes", JSON.stringify(attributeList), 365 * 24);
+10345: this.ajaxSyncToStores("/Product/SyncUpdateMoreSpecProductsToStores", data, true);
+10348: confirmUpdateProductToStores: function (stores, product, fromUserId) {
+10351: boxType: "confirm",
+10353: confirmText: lang.tryGet("是"),
+10355: onConfirm: function () {
+10356: if (this.confirmValue) {
+10357: _this.bulidStoreList(stores, "update");
+10369: syncUpdateProductToStores: function () {
+10376: $("#syncDiv .attributeCheckBoxList div.checkBoxDiv.on").each(function (index, item) {
+10391: pospal.setCookie("syncUpdateProductAttributes", JSON.stringify(attributeList), 365 * 24);
+10392: this.ajaxSyncToStores("/Product/SyncUpdateProductToStores", data, true);
+10395: ajaxSyncToStores: function (url, data, useJob) {
+10396: var toStoreIds = this.getSelectedStoreIds();
+10397: if (toStoreIds.length == 0) {
+10403: _this.SyncedNum = 0;
+10404: var syncLimit = $("#hf_userJobToSyncProductLimit").val();
+10405: if (useJob && hasUserJobServiceAuth && toStoreIds.length >= syncLimit) {
+10408: postData.toUserIds = toStoreIds;
+10411: _this.saveUserJob(postData);
+10415: var limit = _this.getLimit(toStoreIds);
+10420: _this.ajaxSyncToStoresV2(batch.batchUrl, data, limit);
+10425: function ajaxPost(toStoreId) {
+10426: data.userId = toStoreId;
+10427: var $li = $("#syncDiv .copyStore ul div[data=" + toStoreId + "]").parent().parent().parent();
+10428: if (_this.toStoreSelector) _this.toStoreSelector.setSyncInfo(toStoreId, lang.tryGet("进行中"), '');
+10429: $("#syncDiv .mCustomScrollbar").mCustomScrollbar('scrollTo', $li, {
+10432: return pospal.ajax({
+10436: _this.SyncedNum++;
+10438: if (_this.toStoreSelector) _this.toStoreSelector.setSyncInfo(toStoreId, lang.tryGet("已完成"), '');
+10441: if (_this.toStoreSelector) _this.toStoreSelector.setSyncInfo(toStoreId, lang.tryGet("复制失败"), result.msg.replace("\\n", "\n"));
+10448: var doing = new pospal.ui.loading($("#syncDiv"), true);
+10449: pospal.concurrentAjax(toStoreIds, ajaxPost, limit).then(function () {
+10456: $("#syncDiv .confirm").hide();
+10476: url: "/Product/CopyNewProductToStores", batchUrl: "/Product/BatchCopyNewProductToStores"
+10479: url: "/Product/SyncUpdateProductToStores", batchUrl: "/Product/BatchSyncUpdateProductToStores"
+10482: url: "/Product/DeleteStoreProduct", batchUrl: "/Product/BatchDeleteStoreProduct"
+10485: url: "/Product/CopyNewProductsToStores", batchUrl: "/Product/BatchCopyNewProductsToStores"
+10488: url: "/Product/SyncUpdateProductsToStores", batchUrl: "/Product/BatchSyncUpdateProductsToStores"
+10492: ajaxSyncToStoresV2: function (url, data, limit) {
+10494: that.SyncedNum = 0;
+10495: var toStoreIds = this.getSelectedStoreIds();
+10497: var toStoreIdGroups = [];
+10498: pospal.forEachInBatches(toStoreIds, function (tmp) {
+10499: toStoreIdGroups.push(tmp);
+10503: var doing = new pospal.ui.loading($("#syncDiv"), true);
+10504: pospal.concurrentAjax(toStoreIdGroups, function ajaxPost(gUserIds) {
+10506: var $lis = $("#syncDiv .copyStore ul li").filter(function () {
+10507: var liStoreId = $(this).find("div[data]").attr("data");
+10509: return it == liStoreId
+10514: $("#syncDiv .mCustomScrollbar").mCustomScrollbar('scrollTo', $lis.eq(0), {
+10517: return pospal.ajax({
+10521: that.SyncedNum++;
+10524: var $li = $("#syncDiv ul div[data=" + item.userId + "]").parent().parent().parent();

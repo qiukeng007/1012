@@ -1,0 +1,264 @@
+2417:   Future<(String?, String?)> replaceProductImage(
+2418:     StoreConfig store,
+2419:     String barcode,
+2420:     List<int> imageBytes,
+2421:     String imageName, {
+2422:     String? productUid,
+2423:     String? productId,
+2424:     void Function(String name, int ms, String? detail)? onStep,
+2425:   }) async {
+2426:     final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+2427:     final code = barcode.trim();
+2428:     if (code.isEmpty) return ('条码为空', null);
+2429: 
+2430:     final cookie = await _sessionManager.getCookie(store.storeKey);
+2431:     if (cookie == null || cookie.isEmpty) return ('未登录', null);
+2432: 
+2433:     final sw = Stopwatch()..start();
+2434:     void recordStep(String name, [String? detail]) {
+2435:       onStep?.call(name, sw.elapsedMilliseconds, detail);
+2436:       sw..reset()..start();
+2437:     }
+2438: 
+2439:     try {
+2440:       // 1. 获取 userId
+2441:       final userId = await _resolveStoreUserId(store, cookie);
+2442:       if (userId == null) return ('无法获取门店信息', null);
+2443:       recordStep('切店/获取userId');
+2444: 
+2445:       // 2. 定位该门店的商品ID（同步照片时已缓存则跳过重新搜索，每家店省1个请求）
+2446:       var pid = productId;
+2447:       if (pid == null || pid.isEmpty) {
+2448:         final (locErr, locatedId) =
+2449:             await _locateProductId(baseUrl, cookie, userId, code, productUid);
+2450:         if (locErr != null) return (locErr, null);
+2451:         pid = locatedId;
+2452:         recordStep('定位商品ID');
+2453:       } else {
+2454:         recordStep('定位商品ID', '使用缓存');
+2455:       }
+2456: 
+2457:       // 3. FindProduct 获取商品旧图片列表（productimages[].id）
+2458:       var (findErr, product) = await _findProductData(baseUrl, cookie, pid!);
+2459:       if (findErr != null) return (findErr, null);
+2460:       if (product == null && productId != null && productId.isNotEmpty) {
+2461:         // 缓存定位可能已失效：重新搜索定位后再查一次
+2462:         final (locErr, locatedId) =
+2463:             await _locateProductId(baseUrl, cookie, userId, code, productUid);
+2464:         if (locErr != null) return (locErr, null);
+2465:         pid = locatedId;
+2466:         (findErr, product) = await _findProductData(baseUrl, cookie, pid!);
+2467:         if (findErr != null) return (findErr, null);
+2468:       }
+2469:       recordStep('查询商品详情');
+2470:       final oldImages = (product?['productimages'] as List?) ?? const <dynamic>[];
+2471: 
+2472:       // 4. 删除全部旧图（任一张删除失败则中止，保证替换一致性）
+2473:       for (final item in oldImages) {
+2474:         if (item is! Map<String, dynamic>) continue;
+2475:         final imgId = item['id']?.toString() ?? '';
+2476:         if (imgId.isEmpty || imgId == '0') continue;
+2477:         final delUri = Uri.parse('$baseUrl/Product/DeleteProductImage');
+2478:         final delReq = await _httpClient.postUrl(delUri);
+2479:         delReq.headers.set('User-Agent', _ua);
+2480:         delReq.headers.set('Accept', 'application/json, text/javascript, */*');
+2481:         delReq.headers.set('Referer', '$baseUrl/Product/Manage');
+2482:         delReq.headers.set('Origin', baseUrl);
+2483:         delReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+2484:         delReq.headers.set('Content-Type',
+2485:             'application/x-www-form-urlencoded; charset=UTF-8');
+2486:         delReq.headers.set('Cookie', cookie);
+2487:         delReq.followRedirects = false;
+2488:         delReq.write(_encodeForm({
+2489:           'productImageId': imgId,
+2490:           'forMulColorSize': 'false',
+2491:         }));
+2492:         final delResp = await delReq.close().timeout(const Duration(seconds: 15));
+2493:         if (delResp.statusCode != 200) {
+2494:           return ('删除旧图失败 (HTTP ${delResp.statusCode})', null);
+2495:         }
+2496:         final delBody = await _readBody(delResp);
+2497:         try {
+2498:           final delResult = jsonDecode(delBody) as Map<String, dynamic>;
+2499:           if (delResult['successed'] == false) {
+2500:             return ('删除旧图失败：${delResult['msg'] ?? ''}', null);
+2501:           }
+2502:         } catch (_) {
+2503:           // 响应非 JSON 时按成功处理
+2504:         }
+2505:         recordStep('删除旧图');
+2506:       }
+2507: 
+2508:       // 5. 上传新图（独立上传接口，不需要 SaveProduct）
+2509:       final uploadUri = Uri.parse(
+2510:           '$baseUrl/Product/UploadProductImage?userId=$userId&productId=$pid&forMulColorSize=false');
+2511:       final client = HttpClient();
+2512:       client.connectionTimeout = const Duration(seconds: 15);
+2513:       final request = await client.postUrl(uploadUri);
+2514:       final boundary = '----ImgBoundary${DateTime.now().millisecondsSinceEpoch}';
+2515:       request.headers.set('User-Agent', _ua);
+2516:       request.headers.set('Accept', 'application/json, text/javascript, */*');
+2517:       request.headers.set('Referer', '$baseUrl/Product/Manage');
+2518:       request.headers.set('Origin', baseUrl);
+2519:       request.headers.set('X-Requested-With', 'XMLHttpRequest');
+2520:       request.headers.contentType = ContentType(
+2521:         'multipart',
+2522:         'form-data',
+2523:         parameters: {'boundary': boundary},
+2524:       );
+2525:       request.headers.set('Cookie', cookie);
+2526:       request.followRedirects = false;
+2527: 
+2528:       final body = <int>[];
+2529:       body.addAll(utf8.encode('--$boundary\r\n'));
+2530:       body.addAll(utf8.encode(
+2531:           'Content-Disposition: form-data; name="file"; filename="$imageName"\r\n'));
+2532:       body.addAll(utf8.encode('Content-Type: image/jpeg\r\n\r\n'));
+2533:       body.addAll(imageBytes);
+2534:       body.addAll(utf8.encode('\r\n--$boundary--\r\n'));
+2535:       request.add(body);
+2536:       final uploadKb = (imageBytes.length / 1024).ceil();
+2537:       // 上传分两段计时：发送请求(含等响应头) 与 读取响应体，定位慢在网络还是服务器
+2538:       final sendSw = Stopwatch()..start();
+2539:       String? sendFail;
+2540:       HttpClientResponse? resp;
+2541:       try {
+2542:         resp = await request.close().timeout(const Duration(seconds: 60));
+2543:       } catch (e) {
+2544:         sendFail = '${e.runtimeType}: $e';
+2545:       }
+2546:       onStep?.call('上传图片-发送请求', sendSw.elapsedMilliseconds,
+2547:           sendFail != null ? '失败: $sendFail' : '约${uploadKb}KB');
+2548:       if (sendFail != null) return ('上传失败: $sendFail', null);
+2549:       final readSw = Stopwatch()..start();
+2550:       String? readFail;
+2551:       String respBody = '';
+2552:       try {
+2553:         respBody = await _readBody(resp!);
+2554:       } catch (e) {
+2555:         readFail = '${e.runtimeType}: $e';
+2556:       }
+2557:       onStep?.call('上传图片-读取响应', readSw.elapsedMilliseconds,
+2558:           readFail != null ? '失败: $readFail' : null);
+2559:       if (readFail != null) return ('读取响应失败: $readFail', null);
+2560: 
+2561:       final uploadResp = resp!;
+2562:       if (uploadResp.statusCode != 200) {
+2563:         return ('上传失败 (HTTP ${uploadResp.statusCode})', null);
+2564:       }
+2565: 
+2566:       Map<String, dynamic> result;
+2567:       try {
+2568:         result = jsonDecode(respBody) as Map<String, dynamic>;
+2569:       } catch (_) {
+2570:         return ('上传响应解析失败：$respBody', null);
+2571:       }
+2572:       if (result['successed'] != true) {
+2573:         return ('上传失败：$respBody', null);
+2574:       }
+2575:       final msg = result['msg']?.toString() ?? '';
+2576:       if (msg.isEmpty) return ('上传失败：未返回图片路径', null);
+2577:       final path = msg.startsWith('/') ? msg : '/$msg';
+2578:       final imageUrl = '$_imageDomain$path';
+2579:       return (null, imageUrl);
+2580:     } catch (e) {
+2581:       return ('替换图片异常：${e.toString()}', null);
+2582:     }
+2583:   }
+2584: 
+2585: // 银豹 CDN 图片域名（后台 #imageDomain）
+2586:   static const String _imageDomain = 'https://img.pospal.cn/';
+2587: 
+2588:   String _encodeForm(Map<String, String> data) {
+2589:     return data.entries
+2590:         .map((e) =>
+2591:             '${Uri.encodeComponent(e.key)}=${Uri.encodeComponent(e.value)}')
+2592:         .join('&');
+2593:   }
+2594: }
+2595: 
+2596: 
+2597: 
+2598: 
+2599: 
+2600: 
+2601: 
+2602: 
+2603: 
+2604: 
+2605: 
+2606: 
+2607: 
+2608: 
+2609: 
+2610: 
+2611: 
+2612: 
+2613: 
+2614: 
+2615: 
+2616: 
+2617: 
+2618: 
+2619: 
+2620: 
+2621: 
+2622: 
+2623: 
+2624: 
+2625: 
+2626: 
+2627: 
+2628: 
+2629: 
+2630: 
+2631: 
+2632: 
+2633: 
+2634: 
+2635: 
+2636: 
+2637: 
+2638: 
+2639: 
+2640: 
+2641: 
+2642: 
+2643: 
+2644: 
+2645: 
+2646: 
+2647: 
+2648: 
+2649: 
+2650: 
+2651: 
+2652: 
+2653: 
+2654: 
+2655: 
+2656: 
+2657: 
+2658: 
+2659: 
+2660: 
+2661: 
+2662: 
+2663: 
+2664: 
+2665: 
+2666: 
+2667: 
+2668: 
+2669: 
+2670: 
+2671: 
+2672: 
+2673: 
+2674: 
+2675: 
+2676: 
+2677: 
+2678: 
+2679: 
+2680: 

@@ -1,0 +1,201 @@
+460:           final waitMs = soonest != null
+461:               ? (soonest - nowMs).clamp(1000, 20000)
+462:               : (anyWaiting ? 20000 : 5000);
+463:           await Future<void>.delayed(
+464:               Duration(milliseconds: (waitMs as num).toInt()));
+465:           continue;
+466:         }
+467:       }
+468: 
+469:       final fresh = await _loadQueueJob(todo.id);
+470:       if (fresh == null) continue; // 文件已被删除（合并/删除）
+471:       if (fresh.superseded) _cancelledIds.add(fresh.id);
+472:       await _processJob(qs, fresh);
+473:     }
+474:   }
+475: 
+476:   Future<void> _processJob(QueryService qs, PhotoJob job) async {
+477:     if (job.superseded || _cancelledIds.contains(job.id)) {
+478:       await _finishSuperseded(job);
+479:       return;
+480:     }
+481:     job.status = PhotoJobStatus.processing;
+482:     job.startedAt ??= DateTime.now().toIso8601String();
+483:     await _saveQueueJob(job);
+484:     await refreshCount();
+485:     _notify();
+486: 
+487:     // 预解析图片字节（所有门店共用一份）
+488:     List<int>? bytes;
+489:     String? resolveErr;
+490:     if (job.imageFile != null) {
+491:       final f = File(
+492:           '${(await _imgDir()).path}${Platform.pathSeparator}${job.imageFile}');
+493:       try {
+494:         if (await f.exists()) bytes = await f.readAsBytes();
+495:       } catch (_) {}
+496:       if (bytes == null) resolveErr = '本地图片文件缺失';
+497:     } else if (job.sourceUrl != null) {
+498:       bytes = await ProductImageCache.loadBytes(job.sourceUrl!);
+499:       if (bytes == null) resolveErr = '原图下载失败';
+500:     } else {
+501:       resolveErr = '缺少图片来源';
+502:     }
+503: 
+504:     final storeResults = List<PhotoStoreResult>.from(job.results);
+505:     var realRun = false;
+506: 
+507:     // 同一任务内的各门店并行上传，避免串行等待拖慢整个队列
+508:     final todoStores = job.stores
+509:         .where((store) => !storeResults.any((r) =>
+510:             r.storeKey == store.storeKey && r.status == 'success'))
+511:         .toList();
+512: 
+513:     // 每个门店完成即保存进度（与串行版一致的崩溃恢复语义），门店之间并发执行
+514:     final ranFlags = <bool>[];
+515:     await Future.wait(todoStores.map((store) async {
+516:       if (job.superseded || _cancelledIds.contains(job.id)) return;
+517:       final result = await _runStore(
+518:         qs,
+519:         job,
+520:         store,
+521:         bytes: bytes,
+522:         resolveErr: resolveErr,
+523:       );
+524:       storeResults.removeWhere((r) => r.storeKey == result.storeKey);
+525:       storeResults.add(result);
+526:       job.results = storeResults;
+527:       ranFlags.add(result.status != 'waitingLogin');
+528:       await _saveQueueJob(job);
+529:       _notify();
+530:     }));
+531:     realRun = ranFlags.any((ran) => ran);
+532: 
+533:     if (job.superseded || _cancelledIds.contains(job.id)) {
+534:       await _finishSuperseded(job);
+535:       return;
+536:     }
+537: 
+538:     final successCount =
+539:         storeResults.where((r) => r.status == 'success').length;
+540:     final waitingCount =
+541:         storeResults.where((r) => r.status == 'waitingLogin').length;
+542: 
+543:     if (successCount == job.stores.length) {
+544:       await _finalize(job, PhotoJobStatus.success);
+545:       return;
+546:     }
+547: 
+548:     if (waitingCount == job.stores.length) {
+549:       // 全部未登录：不消耗次数，等待登录后继续
+550:       job.status = PhotoJobStatus.waitingLogin;
+551:       await _saveQueueJob(job);
+552:       await refreshCount();
+553:       _notify();
+554:       return;
+555:     }
+556: 
+557:     if (realRun) job.attempts++;
+558: 
+559:     if (job.attempts >= maxAttempts) {
+560:       final st = successCount > 0
+561:           ? PhotoJobStatus.partial
+562:           : PhotoJobStatus.failed;
+563:       await _finalize(job, st);
+564:       return;
+565:     }
+566: 
+567:     job.status = PhotoJobStatus.pending;
+568:     final idx = (job.attempts - 1).clamp(0, _backoffMs.length - 1);
+569:     final delayMs = _backoffMs[(idx as num).toInt()];
+570:     job.nextAttemptAt = DateTime.now().millisecondsSinceEpoch + delayMs;
+571:     await _saveQueueJob(job);
+572:     await refreshCount();
+573:     _notify();
+574:   }
+575: 
+576:   Future<PhotoStoreResult> _runStore(
+577:     QueryService qs,
+578:     PhotoJob job,
+579:     StoreConfig store, {
+580:     required List<int>? bytes,
+581:     required String? resolveErr,
+582:   }) async {
+583:     final steps = <PhotoStep>[];
+584:     final sw = Stopwatch()..start();
+585: 
+586:     if (bytes == null) {
+587:       final err = resolveErr ?? '图片数据为空';
+588:       return PhotoStoreResult(
+589:         storeKey: store.storeKey,
+590:         storeName: store.name,
+591:         status: 'failed',
+592:         error: err,
+593:         steps: [PhotoStep(name: '准备图片', ms: 0, detail: err)],
+594:       );
+595:     }
+596: 
+597:     final (err, url) = await qs.replaceProductImage(
+598:       store,
+599:       job.barcode,
+600:       bytes,
+601:       'IMG_${job.id}.jpg',
+602:       productUid: job.productUid,
+603:       productId: qs.getCachedProductId(store, job.barcode, job.productUid),
+604:       onStep: (name, ms, detail) =>
+605:           steps.add(PhotoStep(name: name, ms: ms, detail: detail)),
+606:     );
+607: 
+608:     if (err == '未登录') {
+609:       return PhotoStoreResult(
+610:         storeKey: store.storeKey,
+611:         storeName: store.name,
+612:         status: 'waitingLogin',
+613:         error: '未登录',
+614:         steps: steps,
+615:         wallMs: sw.elapsedMilliseconds,
+616:       );
+617:     }
+618:     if (err != null || url == null) {
+619:       return PhotoStoreResult(
+620:         storeKey: store.storeKey,
+621:         storeName: store.name,
+622:         status: 'failed',
+623:         error: err ?? '上传失败',
+624:         steps: steps,
+625:         wallMs: sw.elapsedMilliseconds,
+626:       );
+627:     }
+628: 
+629:     String? descErr;
+630:     if (job.writeDesc && !job.superseded && job.opName.trim().isNotEmpty) {
+631:       final dw = Stopwatch()..start();
+632:       descErr = await qs.updateProductOperationNote(
+633:         store,
+634:         job.barcode,
+635:         job.opName,
+636:         job.opDesc,
+637:         productUid: job.productUid,
+638:       );
+639:       steps.add(PhotoStep(
+640:           name: '写操作记录',
+641:           ms: dw.elapsedMilliseconds,
+642:           detail: descErr));
+643:     }
+644: 
+645:     return PhotoStoreResult(
+646:       storeKey: store.storeKey,
+647:       storeName: store.name,
+648:       status: 'success',
+649:       imageUrl: url,
+650:       error: descErr,
+651:       steps: steps,
+652:       wallMs: sw.elapsedMilliseconds,
+653:     );
+654:   }
+655: 
+656:   Future<void> _finalize(PhotoJob job, PhotoJobStatus status) async {
+657:     _cancelledIds.remove(job.id);
+658:     job.status = status;
+659:     job.finishedAt = DateTime.now().toIso8601String();
+660:     job.totalMs = DateTime.now().difference(job.createdAt).inMilliseconds;

@@ -1,0 +1,80 @@
+147: productSelectorApp.updateSelector(userSelector.getSelectedValue());
+182: productSelectorApp.updateSelector(userSelector.getSelectedValue());
+193: if (selectedUserId != userSelector.getSelectedValue()) {
+194: userSelector.setSelectedValue(selectedUserId);
+395: pospal.openPage("/ProductInfo/Catering?userId=" + userSelector.getSelectedValue() + "&uid=" + $(this).parents('tr').attr("data-uid"), false);
+461: var selectedUserId = userSelector ? userSelector.getSelectedValue() : "";
+512: advancedStoreSelector.reset([userSelector.getSelectedValue()]);
+588: pospal.openPage("/Product/BatchUpdate?menuTabId=copy&menuUserId=" + userSelector.getSelectedValue(), true);
+606: var userId = userSelector.getSelectedValue();
+640: data: { "userId": userSelector.getSelectedValue() },
+661: "userId": userSelector.getSelectedValue(),
+714: data: { "userId": userSelector.getSelectedValue(), "withNumber": true },
+756: data: { "userId": userSelector.getSelectedValue() },
+770: data: { "userId": userSelector.getSelectedValue() },
+785: data: { "userId": userSelector.getSelectedValue(), "onlyRestaurantArea": true },
+801: data: { "userId": userSelector.getSelectedValue() },
+815: data: { "userId": userSelector.getSelectedValue() },
+832: data: { "userId": userSelector.getSelectedValue() },
+844: data: { "userId": userSelector.getSelectedValue(), orderBy: "zh-cn" },
+861: data: { "userId": userSelector.getSelectedValue(), "groupByName": true },
+876: data: { "userId": userSelector.getSelectedValue(), typeNumber: "1367" },
+891: data: { "userId": userSelector.getSelectedValue() },
+927: queryCriterias.userId = userSelector.getSelectedValue();
+957: userSelector.setSelectedValue(userId);
+1145: query.userId = userSelector.getSelectedValue();
+1637: this.importStoreSelector.setSelectedValue(userSelector.getSelectedValue());
+1951: data: { userId: userSelector.getSelectedValue(), enable: 1, productTagUidsJson: '[]' },
+2160: var excludeStoreId = userSelector.getSelectedValue();
+2163: url: "/Account/LoadSubStoresByUserIdDDLJson",
+2164: data: { userId: currentUserId, withSelf: true, withParent: true, withCreatedDatetime: pospal.getStoreCount(storeOptions) > 2000, simple: true },
+2192: excludeStoreIds: [excludeStoreId],
+2281: var data = { fromUserId: userSelector.getSelectedValue(), categoryType: ((isMeiYe || isYiPei || isPetHospital || isMuYinSecondary) ? getCategoryType() : null) };
+2423: var excludeStoreId = userSelector.getSelectedValue();
+2424: var index = pospal.findIndex(selectedStoreIds, function (n) { return n == excludeStoreId; });
+2672: data: { "userId": userSelector.getSelectedValue(), "unitName": unitName },
+2728: "userId": userSelector.getSelectedValue(),
+2755: "userId": userSelector.getSelectedValue(),
+3127: data: { "storeId": userSelector.getSelectedValue(), "printersJson": JSON.stringify(printers) },
+3334: data: { "storeId": userSelector.getSelectedValue(), "printersJson": JSON.stringify(printers) },
+5011: "userId": userSelector.getSelectedValue(),
+5609: pospal.openPage("/ProductInfo/Catering?userId=" + userSelector.getSelectedValue(), false);
+5612: pospal.openPage("/ProductInfo/Retail?userId=" + userSelector.getSelectedValue(), false);
+5622: var userId = userSelector.getSelectedValue();
+6246: _this.viewModel = { userId: userSelector.getSelectedValue() };
+6267: this.edit_productStoreSelector.setSelectedValue(userSelector.getSelectedValue());
+7060: var data = { userId: userSelector.getSelectedValue(), categoryUid: this.edit_productCategorySelector.getSelectedValue() };
+7112: var data = { userId: userSelector.getSelectedValue() };
+7219: data.userId = userSelector.getSelectedValue();
+7273: data: { userId: userSelector.getSelectedValue(), artNO: artNO },
+9000: var url = "/Promotion/Combo?userId=" + userSelector.getSelectedValue();
+9389: var url = "/Promotion/Combo?userId=" + userSelector.getSelectedValue();
+9525: up.settings.url = "/Product/UploadProductImage?userId=" + userSelector.getSelectedValue() + "&productId=" + $("#editArea").data("id") + "&forMulColorSize=" + $("#editArea").data("isMulColorSize");
+9860: data: { "userId": userSelector.getSelectedValue(), "imageBase64": b64, "returnFormat": returnFormat },
+9954: data: { "userId": userSelector.getSelectedValue(), "imageBase64": b64, "productImageId": $li.data("imgId"), "forMulColorSize": $("#editArea").data("isMulColorSize") },
+10118: excludeStoreIds: [],
+10128: loadDataFunc: sync.loadSyncStore
+10131: sync.loadSyncStore();
+10561: var excludeStoreId = userSelector.getSelectedValue();
+10562: var index = pospal.findIndex(selectedStoreIds, function (n) { return n == excludeStoreId; });
+10609: loadSyncStore: function () {
+10618: url: "/Account/LoadSubStoresByUserIdDDLJson",
+10619: data: { userId: currentUserId, withSelf: true, withParent: true, withCreatedDatetime: pospal.getStoreCount(storeOptions) > 2000, simple: true },
+10661: excludeStoreIds: [],
+10671: loadDataFunc: sync.loadSyncStore
+10842: fromUserId: userSelector.getSelectedValue()
+11046: "userId": userSelector.getSelectedValue(), "groupName": name, groupType: groupType
+11238: "userId": userSelector.getSelectedValue(), "tagName": tagName, groupUid: groupUid
+11370: "userId": userSelector.getSelectedValue(), "uid": uid, "parentCategoryName": "", "categoryName": categoryName, categoryType: 2, "getSyncStores": false
+11378: "userId": userSelector.getSelectedValue(),
+11639: "userId": userSelector.getSelectedValue(), "brandName": BrandName
+11680: _this.loadSyncStores();
+11727: loadSyncStores: function () {
+11728: var excludeStoreId = userSelector.getSelectedValue();
+11732: url: "/Account/LoadSyncStores",
+11734: excludeStoreId: excludeStoreId
+11796: fromUserId: userSelector.getSelectedValue()
+12335: this.importStoreSelector.setSelectedValue(userSelector.getSelectedValue());
+12565: up.settings.url = "/Product/UploadProductImage?userId=" + userSelector.getSelectedValue() + "&productId=0";
+13377: var userId = userSelector.getSelectedValue();
+14194: data: { "userId": userSelector.getSelectedValue(), "products": JSON.stringify(draftValue) },

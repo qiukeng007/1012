@@ -1,0 +1,50 @@
+1: import 'dart:convert';
+2: import 'dart:io';
+3: import 'dart:math';
+4: import '../models/store_config.dart';
+5: import '../models/product_result.dart';
+6: import '../models/query_log.dart';
+7: import '../models/stock_history.dart';
+8: import 'package:shared_preferences/shared_preferences.dart';
+9: import 'session_manager.dart';
+10: import 'query_logger.dart';
+11: 
+12: /// 条码查询服务
+13: ///
+14: /// 银豹新版查询 API（2025年）：
+15: /// 旧的查询接口（/Product/QueryProducts, /Product/QueryProductByBarcode 等）已废弃，
+16: /// 全部返回 302 重定向到 /?error=404。
+17: ///
+18: /// 新的查询流程：
+19: /// 1. GET /Product/Manage 获取页面，提取 currentUserId（门店ID）
+20: /// 2. POST /Product/LoadProductsByPage 提交查询参数（form-encoded）
+21: ///    参数：userId, enable, productTagUidsJson, keyword, groupBySpu,
+22: ///          categorysJson, supplierUid, categoryType, pageIndex, pageSize
+23: /// 3. 解析返回的 HTML 表格提取商品数据
+24: ///
+25: /// 也可先调用 /Product/LoadProductSummary 获取匹配数量。
+26: class QueryService {
+27:   final SessionManager _sessionManager;
+28:   late final HttpClient _httpClient;
+29: 
+30:   static const String _ua =
+31:       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+32:   /// 已预热（切换到目标门店会话）的门店ID集合，避免每次查询重复切店
+33:   final Set<String> _warmedStores = {};
+34: 
+35:   /// 供货商名称→uid 缓存（storeKey → map），内存 + SharedPreferences 持久化
+36:   final Map<String, Map<String, String>> _supplierUidCache = {};
+37: 
+38:   /// 门店→条码→商品ID 内存缓存（同步照片时跳过重新搜索定位）
+39:   final Map<String, String> _productIdCache = {};
+40: 
+41:   static const String _supplierUidCachePrefix = 'supplier_uid_map_';
+42: 
+43: 
+44:   QueryService(this._sessionManager) {
+45:     _httpClient = HttpClient();
+46:     _httpClient.autoUncompress = true;
+47:     _httpClient.connectionTimeout = const Duration(seconds: 15);
+48:   }
+49: 
+50:   /// 通过 GET Product/Manage?userId= 把账号会话切换到目标门店（网页端切店方式）

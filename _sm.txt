@@ -1,0 +1,259 @@
+1: import 'dart:async';
+2: import 'dart:convert';
+3: import 'dart:io';
+4: import 'package:flutter/services.dart';
+5: import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+6: import 'package:shared_preferences/shared_preferences.dart';
+7: import '../models/login_session.dart';
+8: import 'mode_service.dart';
+9: 
+10: /// Cookie 会话管理
+11: /// - Cookie 持久化到 SharedPreferences
+12: /// - 提供有效性验证
+13: class SessionManager {
+14:   static const _cookiePrefix = 'cookie_';
+15:   static const _userIdPrefix = 'uid_';
+16: 
+17:   /// 桌面端 User-Agent（与 LoginService 一致）
+18:   static const String _ua =
+19:       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+20: 
+21:   /// 保存 Cookie（按当前登录模式分命名空间：门店=cookie_store_，总部=cookie_）
+22:   Future<void> saveCookie(String storeKey, String cookie, {String via = ''}) async {
+23:     await ModeService.instance.ensureLoaded();
+24:     final ns = ModeService.instance.isStoreMode ? 'store_' : '';
+25:     final prefs = await SharedPreferences.getInstance();
+26:     final session = LoginSession(cookie: cookie, via: via);
+27:     await prefs.setString(
+28:       '$_cookiePrefix$ns$storeKey',
+29:       jsonEncode({
+30:         'cookie': session.cookie,
+31:         'via': session.via,
+32:         'createdAt': session.createdAt.toIso8601String(),
+33:       }),
+34:     );
+35:   }
+36: 
+37:   /// 总账号会话回退：门店没有单独保存 Cookie 时，
+38:   /// 使用同后台同账号的 master 会话（微信扫码登录总账号后所有门店共享）
+39:   static String? masterKeyOf(String storeKey) {
+40:     final parts = storeKey.split('|');
+41:     if (parts.length >= 3 && parts[1].isNotEmpty && parts[2] != 'master') {
+42:       return '${parts[0]}|${parts[1]}|master';
+43:     }
+44:     return null;
+45:   }
+46: 
+47:   /// 获取 Cookie（按登录模式读取；门店模式优先带前缀 key，其次兼容旧版 1011-1 无前缀 key）
+48:   Future<String?> getCookie(String storeKey) async {
+49:     await ModeService.instance.ensureLoaded();
+50:     final storeMode = ModeService.instance.isStoreMode;
+51:     final prefs = await SharedPreferences.getInstance();
+52:     if (storeMode) {
+53:       var seg = 'store_' + storeKey;
+54:       var jsonStr = prefs.getString('$_cookiePrefix$seg');
+55:       if (jsonStr == null) {
+56:         // 旧版 1011-1（门店模式）无前缀，直接复用
+57:         jsonStr = prefs.getString('$_cookiePrefix$storeKey');
+58:         if (jsonStr != null) seg = storeKey;
+59:       }
+60:       if (jsonStr == null) return null;
+61:       return _readCookie(prefs, seg);
+62:     }
+63:     // 总部模式
+64:     final jsonStr = prefs.getString('$_cookiePrefix$storeKey');
+65:     if (jsonStr == null) {
+66:       // 总账号会话回退（仅总部模式）：门店未单独登录时使用账号级 master 会话
+67:       final masterKey = masterKeyOf(storeKey);
+68:       if (masterKey != null) {
+69:         return _readCookie(prefs, masterKey);
+70:       }
+71:       return null;
+72:     }
+73:     return _readCookie(prefs, storeKey);
+74:   }
+75: 
+76:   /// 读取并校验指定 key 下保存的 Cookie（过期则删除）
+77:   Future<String?> _readCookie(SharedPreferences prefs, String key) async {
+78:     final jsonStr = prefs.getString('$_cookiePrefix$key');
+79:     if (jsonStr == null) return null;
+80: 
+81:     try {
+82:       final data = jsonDecode(jsonStr) as Map<String, dynamic>;
+83:       final createdAt = DateTime.parse(data['createdAt'] as String);
+84:       final session = LoginSession(
+85:         cookie: data['cookie'] as String? ?? '',
+86:         via: data['via'] as String? ?? '',
+87:         createdAt: createdAt,
+88:       );
+89:       // 门店模式为普通工号登录，本地按 7 天过期；总部模式为微信扫码 OAuth，长期有效
+90:       final age = DateTime.now().difference(createdAt);
+91:       if (session.isExpired ||
+92:           (ModeService.instance.isStoreMode && age.inDays > 7)) {
+93:         await deleteCookie(key);
+94:         return null;
+95:       }
+96:       return session.cookie;
+97:     } catch (_) {
+98:       await deleteCookie(key);
+99:       return null;
+100:     }
+101:   }
+102: 
+103:   /// 删除 Cookie（两种模式命名空间一并清理，避免残留串扰）
+104:   Future<void> deleteCookie(String storeKey) async {
+105:     final prefs = await SharedPreferences.getInstance();
+106:     await prefs.remove('$_cookiePrefix$storeKey');
+107:     await prefs.remove('$_cookiePrefix' + 'store_' + storeKey);
+108:     await prefs.remove('$_userIdPrefix$storeKey');
+109:     await prefs.remove('$_userIdPrefix' + 'store_' + storeKey);
+110:   }
+111: 
+112:   /// 缓存 userId（从 Product/Manage 页面提取，避免每次查询重复请求）
+113:   Future<void> saveUserId(String storeKey, String userId) async {
+114:     await ModeService.instance.ensureLoaded();
+115:     final ns = ModeService.instance.isStoreMode ? 'store_' : '';
+116:     final prefs = await SharedPreferences.getInstance();
+117:     await prefs.setString('$_userIdPrefix$ns$storeKey', userId);
+118:   }
+119: 
+120:   /// 获取缓存的 userId（门店模式兼容旧版 1011-1 无前缀 key）
+121:   Future<String?> getUserId(String storeKey) async {
+122:     await ModeService.instance.ensureLoaded();
+123:     final storeMode = ModeService.instance.isStoreMode;
+124:     final prefs = await SharedPreferences.getInstance();
+125:     if (!storeMode) {
+126:       return prefs.getString('$_userIdPrefix$storeKey');
+127:     }
+128:     final v = prefs.getString('$_userIdPrefix' + 'store_' + storeKey);
+129:     if (v != null) return v;
+130:     return prefs.getString('$_userIdPrefix$storeKey');
+131:   }
+132: 
+133:   /// 验证 Cookie 是否有效
+134:   ///
+135:   /// 先检查商品管理页特征（Product/商品/库存），再检查登录页特征。
+136:   /// 商品管理页的导航栏可能包含"退出登录""修改员工密码"等文字，
+137:   /// 所以不能简单地用"登录+密码"来判断是登录页。
+138:   /// 与 LoginService._verifyLoggedIn 逻辑一致。
+139:   Future<bool> isCookieValid(String storeKey, String baseUrl) async {
+140:     final cookie = await getCookie(storeKey);
+141:     if (cookie == null) return false;
+142: 
+143:     final httpClient = HttpClient();
+144:     httpClient.autoUncompress = true;
+145:     try {
+146:       final uri = Uri.parse('$baseUrl/Product/Manage');
+147:       final request = await httpClient.getUrl(uri);
+148:       request.headers.set('User-Agent', _ua);
+149:       request.headers.set('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+150:       request.headers.set('Accept-Language', 'zh-CN,zh;q=0.9');
+151:       request.headers.set('Cookie', cookie);
+152:       request.followRedirects = false;
+153: 
+154:       final response = await request.close().timeout(const Duration(seconds: 8));
+155:       final body = await _readResponseBody(response);
+156: 
+157:       // 检查是否被重定向到登录页
+158:       if (response.statusCode == 302 || response.statusCode == 301) {
+159:         final loc = response.headers.value('location') ?? '';
+160:         if (RegExp(r'signin|login', caseSensitive: false).hasMatch(loc)) {
+161:           return false;
+162:         }
+163:       }
+164: 
+165:       if (response.statusCode != 200) return false;
+166: 
+167:       // 检查页面是否包含 currentUserId（商品管理页特有）
+168:       if (RegExp(r'currentUserId\s*[=:]', caseSensitive: false).hasMatch(body)) {
+169:         return true;
+170:       }
+171: 
+172:       // 检查是否包含商品管理页特征
+173:       if (body.contains('Product') ||
+174:           body.contains('product') ||
+175:           body.contains('商品') ||
+176:           body.contains('库存') ||
+177:           body.contains('条码') ||
+178:           body.contains('LoadProductsByPage')) {
+179:         return true;
+180:       }
+181: 
+182:       // 检查是否包含登录页特征
+183:       if (body.contains('signin') &&
+184:           (body.contains('form') || body.contains('input'))) {
+185:         return false;
+186:       }
+187: 
+188:       // 检查登录表单特征（登录页特有的结构）
+189:       if (body.contains('regularSignIn_box') ||
+190:           body.contains('loginBox') ||
+191:           body.contains('submitLoginBtn') ||
+192:           body.contains('__RequestVerificationToken')) {
+193:         return false;
+194:       }
+195: 
+196:       return true;
+197:     } catch (_) {
+198:       // 网络异常不判定失效，保留现有 Cookie
+199:       return true;
+200:     } finally {
+201:       httpClient.close();
+202:     }
+203:   }
+204: 
+205:   /// 读取响应体
+206:   Future<String> _readResponseBody(HttpClientResponse response) async {
+207:     final completer = Completer<String>();
+208:     final bytes = <int>[];
+209:     response.listen(
+210:       (data) => bytes.addAll(data),
+211:       onDone: () => completer.complete(utf8.decode(bytes)),
+212:       onError: (e) => completer.completeError(e),
+213:     );
+214:     return completer.future;
+215:   }
+216: 
+217:   /// 获取当前模式已保存 Cookie 的门店 key（总部=旧命名空间，门店=store_ 前缀）
+218:   Future<List<String>> getSavedStoreKeys() async {
+219:     await ModeService.instance.ensureLoaded();
+220:     final storeMode = ModeService.instance.isStoreMode;
+221:     final prefs = await SharedPreferences.getInstance();
+222:     final keys = prefs.getKeys();
+223:     return keys
+224:         .where((k) {
+225:           if (k.startsWith('$_cookiePrefix' + 'store_')) {
+226:             return storeMode;
+227:           }
+228:           return k.startsWith(_cookiePrefix) && !storeMode;
+229:         })
+230:         .map((k) => k.startsWith('$_cookiePrefix' + 'store_')
+231:             ? k.substring(('$_cookiePrefix' + 'store_').length)
+232:             : k.substring(_cookiePrefix.length))
+233:         .toList();
+234:   }
+235: 
+236:   /// 清除所有 Cookie
+237:   Future<void> clearAll() async {
+238:     final prefs = await SharedPreferences.getInstance();
+239:     final keys = prefs.getKeys();
+240:     for (final k in keys) {
+241:       if (k.startsWith(_cookiePrefix)) {
+242:         await prefs.remove(k);
+243:       }
+244:     }
+245:   }
+246: 
+247:   /// 清除 WebView 内保存的 Cookie（退出登录时调用，防止重新登录仍带旧会话）
+248:   Future<void> clearWebViewCookies(String baseUrl) async {
+249:     try {
+250:       await CookieManager.instance().deleteCookies(url: WebUri(baseUrl));
+251:     } catch (_) {}
+252:     if (Platform.isIOS) {
+253:       try {
+254:         const ch = MethodChannel('com.cashcarry/cookies');
+255:         await ch.invokeMethod('clearCookies', {'url': baseUrl});
+256:       } catch (_) {}
+257:     }
+258:   }
+259: }

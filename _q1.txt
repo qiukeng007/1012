@@ -1,0 +1,141 @@
+560:                 curve: Curves.easeOut);
+561:           }
+562:         });
+563:       }
+564:     } catch (e) {
+565:       if (mounted) {
+566:         _timerRunning = false;
+567:         setState(() {
+568:           _error = '查询失败：$e';
+569:           _elapsedText = '';
+570:           _querying = false;
+571:         });
+572:       }
+573:     }
+574:   }
+575: 
+576:   bool _hasStorePhoto(ProductData d) {
+577:     final u = d.imageUrl ?? '';
+578:     return u.isNotEmpty && !u.contains('default_200x200');
+579:   }
+580: 
+581:   /// 后台检查未勾选门店是否有该商品（总账号共享登录，未勾选门店也能查）。
+582:   /// 检查完成后若有“部分门店有图、部分门店缺图”，自动入队后台同步照片。
+583:   Future<void> _checkUncheckedStoreImages(String barcode) async {
+584:     if (_checkingUncheckedImages) return;
+585:     final unchecked = widget.configs.where((c) => !c.enabled).toList();
+586:     if (unchecked.isEmpty) {
+587:       // 全部门店都已勾选：无需额外检查，直接按勾选门店差异自动同步
+588:       if (!mounted || _lastResult?.barcode != barcode) return;
+589:       await _maybeAutoSyncPhoto(barcode);
+590:       return;
+591:     }
+592:     _checkingUncheckedImages = true;
+593:     try {
+594:       final found = <String, ProductData>{};
+595:       await Future.wait(unchecked.map((store) async {
+596:         try {
+597:           final r = await widget.queryService.queryByBarcode(store, barcode);
+598:           if (r.ok && r.data != null && r.data!.name.isNotEmpty) {
+599:             found[store.name] = r.data!;
+600:           }
+601:         } catch (_) {}
+602:       }));
+603:       // 若用户已发起新搜索（条码变化），丢弃本次检查结果
+604:       if (!mounted || _lastResult?.barcode != barcode) return;
+605:       setState(() {
+606:         _uncheckedStoreProducts
+607:           ..clear()
+608:           ..addAll(found);
+609:       });
+610:       await _maybeAutoSyncPhoto(barcode);
+611:     } finally {
+612:       _checkingUncheckedImages = false;
+613:     }
+614:   }
+615: 
+616:   /// 自动照片同步：勾选/未勾选门店中存在“同款商品部分有图、部分缺图”时，
+617:   /// 直接加入照片后台队列把图补到缺图门店（无需手动点按钮）。
+618:   Future<void> _maybeAutoSyncPhoto(String barcode) async {
+619:     if (!mounted || _imageSyncedToAll) return;
+620:     final r = _lastResult;
+621:     if (r == null || r.barcode != barcode) return;
+622:     // 源商品：勾选结果里第一家“有图”的门店；勾选门店都没有图则看未勾选门店
+623:     ProductData? src;
+624:     String? srcStoreName;
+625:     for (final s in r.stores.values) {
+626:       if (s.ok && s.data != null && _hasStorePhoto(s.data!)) {
+627:         src = s.data;
+628:         srcStoreName = s.storeName;
+629:         break;
+630:       }
+631:     }
+632:     if (src == null) {
+633:       for (final c in widget.configs) {
+634:         final p = _uncheckedStoreProducts[c.name];
+635:         if (p != null && _hasStorePhoto(p)) {
+636:           src = p;
+637:           srcStoreName = c.name;
+638:           break;
+639:         }
+640:       }
+641:     }
+642:     if (src == null) return;
+643:     final rawUrl = src.imageUrl ?? '';
+644:     if (rawUrl.isEmpty) return;
+645:     final full =
+646:         rawUrl.startsWith('http') ? rawUrl : 'https://img.pospal.cn$rawUrl';
+647:     final original = full.replaceAll('_200x200', '');
+648: 
+649:     // 目标门店：与源商品同名（同一商品）、但该店缺图的门店（勾选+未勾选）
+650:     final missing = <StoreConfig>[];
+651:     final enabledByName = <String, StoreConfig>{};
+652:     for (final c in widget.configs) {
+653:       if (c.enabled) enabledByName[c.name] = c;
+654:     }
+655:     for (final s in r.stores.values) {
+656:       final cfg = enabledByName[s.storeName];
+657:       if (cfg == null || cfg.name == srcStoreName) continue;
+658:       final d = s.data;
+659:       if (d == null || d.name != src.name) continue;
+660:       if (!_hasStorePhoto(d)) missing.add(cfg);
+661:     }
+662:     for (final c in widget.configs) {
+663:       if (c.enabled || c.name == srcStoreName) continue;
+664:       final p = _uncheckedStoreProducts[c.name];
+665:       if (p == null || p.name != src.name) continue;
+666:       if (!_hasStorePhoto(p)) missing.add(c);
+667:     }
+668:     if (missing.isEmpty) return;
+669: 
+670:     final uid = src.uid?.toString();
+671:     if (await PhotoQueueService.instance.hasActiveJob(barcode, uid)) return;
+672:     try {
+673:       final job = await PhotoQueueService.instance.enqueue(
+674:         type: PhotoJobType.sync,
+675:         barcode: barcode,
+676:         productName: src.name,
+677:         productUid: uid,
+678:         sourceUrl: original,
+679:         writeDesc: false,
+680:         stores: missing,
+681:       );
+682:       _queueWatchBarcode = barcode;
+683:       _queueWatchUid = uid;
+684:       if (mounted) setState(() => _photoQueuedMark = true);
+685:       if (!mounted) return;
+686:       _showBanner(
+687:           '部分门店缺图，已自动加入后台队列同步照片（${job.stores.length} 个门店，队列剩余 ${PhotoQueueService.instance.pendingCount} 条）');
+688:     } catch (_) {
+689:       // 入队失败静默处理，不打断查询
+690:     }
+691:   }
+692: 
+693:   /// 刷新“照片已提交队列”标记：当前商品在后台队列中还有未完成的任务即显示
+694:   Future<void> _refreshPhotoQueuedMark() async {
+695:     final r = _lastResult;
+696:     if (r == null) return;
+697:     final prod = _currentProductData(r);
+698:     if (prod == null) return;
+699:     final uid = prod.uid?.toString();
+700:     final code = prod.barcode.isNotEmpty ? prod.barcode : r.barcode;

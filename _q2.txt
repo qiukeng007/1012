@@ -1,0 +1,211 @@
+1260:                 ),
+1261:                 child: const Text(
+1262:                   '队列中',
+1263:                   style: TextStyle(
+1264:                       fontSize: 8,
+1265:                       color: Colors.white,
+1266:                       height: 1.2,
+1267:                       fontWeight: FontWeight.w600),
+1268:                 ),
+1269:               ),
+1270:             ),
+1271:         ],
+1272:       ),
+1273:     );
+1274:   }
+1275: 
+1276:   /// 无图时点击：拍照/导入图片 → CropPage 手动裁剪成正方形 → 后台队列提交（全门店）
+1277:   Future<void> _addProductImage(ProductData data, String barcode) async {
+1278:     // 选择图片来源
+1279:     final source = await showModalBottomSheet<ImageSource>(
+1280:       context: context,
+1281:       builder: (ctx) => SafeArea(
+1282:         child: Wrap(
+1283:           children: [
+1284:             ListTile(
+1285:               leading: const Icon(Icons.camera_alt),
+1286:               title: const Text('拍照'),
+1287:               onTap: () => Navigator.pop(ctx, ImageSource.camera),
+1288:             ),
+1289:             ListTile(
+1290:               leading: const Icon(Icons.photo_library_outlined),
+1291:               title: const Text('从相册导入'),
+1292:               onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+1293:             ),
+1294:           ],
+1295:         ),
+1296:       ),
+1297:     );
+1298:     if (source == null || !mounted) return;
+1299: 
+1300:     // 参照补货逻辑：选图后进入裁剪页，手动拖动正方形选框
+1301:     final picker = ImagePicker();
+1302:     final picked =
+1303:         await picker.pickImage(source: source, maxWidth: 1200, maxHeight: 1200);
+1304:     if (picked == null || !mounted) return;
+1305:     final croppedPath = await Navigator.of(context).push<String>(
+1306:       MaterialPageRoute(builder: (_) => CropPage(imagePath: picked.path)),
+1307:     );
+1308:     if (croppedPath == null || !mounted) return;
+1309: 
+1310:     final opName = await _ensureOperatorName();
+1311:     if (opName == null) {
+1312:       _showBanner('请填写操作员姓名后再上传图片', isError: true);
+1313:       return;
+1314:     }
+1315: 
+1316:     setState(() => _uploadingProductImage = true);
+1317:     try {
+1318:       final stores = PhotoQueueService.photoTargetStores(widget.configs);
+1319:       if (stores.isEmpty) {
+1320:         _showBanner('没有可同步的有效门店，请先完成门店登录', isError: true);
+1321:         return;
+1322:       }
+1323:       final raw = await File(croppedPath).readAsBytes();
+1324:       final job = await PhotoQueueService.instance.enqueue(
+1325:         type: PhotoJobType.add,
+1326:         barcode: barcode,
+1327:         productName: data.name,
+1328:         productUid: data.uid?.toString(),
+1329:         imageBytes: raw,
+1330:         opName: opName,
+1331:         writeDesc: true,
+1332:         stores: stores,
+1333:       );
+1334:       _queueWatchBarcode = barcode;
+1335:       _queueWatchUid = data.uid?.toString();
+1336:       if (mounted) setState(() => _photoQueuedMark = true);
+1337:       if (!mounted) return;
+1338:       _showBanner(
+1339:           '照片已加入后台队列，剩余 ${PhotoQueueService.instance.pendingCount} 条（自动同步 ${job.stores.length} 个门店）');
+1340:     } catch (e) {
+1341:       if (mounted) _showBanner('照片入队失败：$e', isError: true);
+1342:     } finally {
+1343:       if (mounted) setState(() => _uploadingProductImage = false);
+1344:     }
+1345:   }
+1346: 
+1347:   /// 打开库存变动明细页（按勾选门店查询银豹变动记录）
+1348:   void _openStockHistory(ProductData data, String barcode) {
+1349:     final enabledConfigs = widget.configs.where((c) => c.enabled).toList();
+1350:     if (enabledConfigs.isEmpty) {
+1351:       _showBanner('未勾选任何搜索门店', isError: true);
+1352:       return;
+1353:     }
+1354:     final realBarcode = data.barcode.isNotEmpty ? data.barcode : barcode;
+1355:     Navigator.of(context).push(
+1356:       MaterialPageRoute(
+1357:         builder: (_) => StockHistoryPage(
+1358:           configs: enabledConfigs,
+1359:           queryService: widget.queryService,
+1360:           barcode: realBarcode,
+1361:           productName: _productNameOverrides[_productKey(data)] ?? data.name,
+1362:         ),
+1363:       ),
+1364:     );
+1365:   }
+1366: 
+1367:   void _showProductImagePreview(ProductData data, String barcode) {
+1368:     final url = _productImageOverrides[barcode] ?? data.imageUrl ?? '';
+1369:     if (url.isEmpty) return;
+1370:     // 预览加载原图（去掉 _200x200 缩略图后缀），走缓存优先组件
+1371:     final full = url.startsWith('http') ? url : 'https://img.pospal.cn$url';
+1372:     final original = full.replaceAll('_200x200', '');
+1373:     showDialog(
+1374:       context: context,
+1375:       barrierColor: Colors.black87,
+1376:       builder: (ctx) => GestureDetector(
+1377:         behavior: HitTestBehavior.opaque,
+1378:         onTap: () => Navigator.pop(ctx),
+1379:         child: SizedBox.expand(
+1380:           child: Stack(
+1381:             children: [
+1382:               Center(
+1383:                 child: InteractiveViewer(
+1384:                   maxScale: 5,
+1385:                   child: _CachedImage(
+1386:                     url: original,
+1387:                     fit: BoxFit.contain,
+1388:                     radius: 0,
+1389:                     placeholder: const Icon(Icons.broken_image, size: 64, color: Colors.white70),
+1390:                   ),
+1391:                 ),
+1392:               ),
+1393:               // 放大界面内选择是否更换照片
+1394:               Positioned(
+1395:                 right: 16,
+1396:                 bottom: 28,
+1397:                 child: FloatingActionButton.extended(
+1398:                   heroTag: 'change_product_image',
+1399:                   backgroundColor: Colors.white.withValues(alpha: 0.92),
+1400:                   foregroundColor: Colors.black87,
+1401:                   icon: const Icon(Icons.camera_alt),
+1402:                   label: const Text('更换照片'),
+1403:                   onPressed: () {
+1404:                     Navigator.pop(ctx);
+1405:                     _addProductImage(data, barcode);
+1406:                   },
+1407:                 ),
+1408:               ),
+1409:             ],
+1410:           ),
+1411:         ),
+1412:       ),
+1413:     );
+1414:   }
+1415: 
+1416:   final Map<String, String> _transCache = {};
+1417: 
+1418:   /// 复制文本到剪贴板并提示
+1419:   void _copyText(String text) {
+1420:     Clipboard.setData(ClipboardData(text: text));
+1421:     _showBanner('已复制：$text');
+1422:   }
+1423: 
+1424:   /// 商品身份键：优先用商品唯一ID，避免同一条码多个商品互相覆盖
+1425:   String _productKey(ProductData d) {
+1426:     final uid = d.uid?.toString() ?? '';
+1427:     if (uid.isNotEmpty) return 'uid:$uid';
+1428:     return 'bc:${d.barcode}';
+1429:   }
+1430: 
+1431:   Widget _buildProductName(String name, ProductData data) {
+1432:     if (name.isEmpty) {
+1433:       return const Text('(未命名商品)',
+1434:           style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold));
+1435:     }
+1436: 
+1437:     // 商品名称完整显示（# 属于名称本身，不能按 # 拆分）
+1438:     final productName = name.trim();
+1439: 
+1440:     // 触发翻译（仅英文名）
+1441:     final needTrans = _needsTranslation(productName);
+1442:     if (needTrans && !_transCache.containsKey(productName)) {
+1443:       _translate(productName);
+1444:     }
+1445: 
+1446:     return Column(
+1447:       crossAxisAlignment: CrossAxisAlignment.start,
+1448:       mainAxisSize: MainAxisSize.min,
+1449:       children: [
+1450:         GestureDetector(
+1451:           // 单击复制，双击编辑商品名称并同步全部门店
+1452:           onTap: () => _copyText(name),
+1453:           onDoubleTap: () => _showProductNameEditor(data),
+1454:           child: Row(
+1455:             mainAxisSize: MainAxisSize.min,
+1456:             crossAxisAlignment: CrossAxisAlignment.center,
+1457:             children: [
+1458:               Flexible(
+1459:                 // 名称过长时自动缩小字体保持单行完整显示，不截断
+1460:                 child: FittedBox(
+1461:                   fit: BoxFit.scaleDown,
+1462:                   alignment: Alignment.centerLeft,
+1463:                   child: Text(
+1464:                     productName.isNotEmpty ? productName : '(未命名商品)',
+1465:                     style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+1466:                   ),
+1467:                 ),
+1468:               ),
+1469:               const SizedBox(width: 6),
+1470:               const Icon(Icons.edit_outlined,

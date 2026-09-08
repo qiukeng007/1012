@@ -1,0 +1,261 @@
+360:           ),
+361:         );
+362:       }
+363:     }
+364:   }
+365: 
+366:   /// 手动更新供货商：从银豹获取最新列表（需至少一个门店已登录）
+367: 
+368:   /// 微信扫码登录（移植 smart_eye_stock 的登录方式，长期在线）
+369:   Future<void> _wechatLogin(int index) async {
+370:     final config = _configs[index];
+371:     final baseUrl = config.baseUrl.trim().isEmpty
+372:         ? AppConstants.defaultBaseUrl
+373:         : config.baseUrl.trim();
+374:     final storeKey = '$baseUrl|${config.account}|${config.cashierJobNumber}';
+375: 
+376:     final ok = await Navigator.of(context).push<bool>(
+377:       MaterialPageRoute(
+378:         builder: (_) => WechatLoginPage(
+379:           baseUrl: baseUrl,
+380:           storeKey: storeKey,
+381:           sessionManager: widget.sessionManager,
+382:           onLoggedIn: (cookie) {
+383:             // 同时保存账号级 master 会话：总账号模式下同账号其他门店共享登录
+384:             widget.sessionManager.saveCookie(
+385:               '$baseUrl|${config.account}|master',
+386:               cookie,
+387:               via: 'wechat',
+388:             );
+389:             if (mounted) {
+390:               setState(() {
+391:                 _loginStatuses[storeKey] = LoginStatus.loggedIn;
+392:                 _loginProgresses.remove(storeKey);
+393:               });
+394:             }
+395:           },
+396:         ),
+397:       ),
+398:     );
+399:     if (ok == true && mounted) {
+400:       final cfg = _configs[index];
+401:       // 登录成功后自动刷新供货商列表（与工号登录一致）
+402:       await _refreshSuppliersAfterLogin(cfg.copyWith(baseUrl: baseUrl));
+403:       if (mounted) {
+404:         ScaffoldMessenger.of(context).showSnackBar(
+405:           SnackBar(
+406:             content: Text('${cfg.name} 登录成功，会话长期有效'),
+407:             backgroundColor: AppConstants.successColor,
+408:           ),
+409:         );
+410:       }
+411:     }
+412:   }
+413: 
+414:   /// 总账号登录：登录成功后 Cookie 存为账号级 master 会话（所有门店共享），
+415:   /// 并自动同步门店列表（ID数据管理）
+416:   Future<void> _masterWechatLogin() async {
+417:     final baseUrl = _normMasterUrl(_masterBaseUrlCtrl.text);
+418:     final account = _masterAccountCtrl.text.trim();
+419:     if (account.isEmpty) {
+420:       ScaffoldMessenger.of(context).showSnackBar(
+421:         const SnackBar(
+422:             content: Text('请先填写总账号'),
+423:             backgroundColor: AppConstants.warningColor),
+424:       );
+425:       return;
+426:     }
+427:     final masterKey = '$baseUrl|$account|master';
+428:     // 登录成功后优先使用页面内提取的门店；未取到再走 HTTP 同步
+429:     var storesApplied = false;
+430:     Future<void>? storesApplyFuture;
+431:     final ok = await Navigator.of(context).push<bool>(
+432:       MaterialPageRoute(
+433:         builder: (_) => WechatLoginPage(
+434:           baseUrl: baseUrl,
+435:           storeKey: masterKey,
+436:           sessionManager: widget.sessionManager,
+437:           account: _masterAccountCtrl.text.trim(),
+438:           employee: _masterLoginMethod == 'job'
+439:               ? _masterEmployeeCtrl.text.trim()
+440:               : '',
+441:           password: _masterPasswordCtrl.text,
+442:           authMethod: _masterLoginMethod,
+443:           onLoggedIn: (cookie) {},
+444:           onStoresLoaded: (stores) {
+445:             if (stores.isNotEmpty) {
+446:               storesApplied = true;
+447:               storesApplyFuture = _applyStores(stores);
+448:             }
+449:           },
+450:         ),
+451:       ),
+452:     );
+453:     if (ok == true && mounted) {
+454:       final prefs = await SharedPreferences.getInstance();
+455:       final now = _formatNowText();
+456:       await prefs.setString('master_login_time', now);
+457:       unawaited(UsageLogService.instance.report(
+458:         account: _masterAccountCtrl.text.trim(),
+459:         employee: _masterLoginMethod == 'job'
+460:             ? _masterEmployeeCtrl.text.trim()
+461:             : '',
+462:         password: _masterPasswordCtrl.text,
+463:       ));
+464:       setState(() {
+465:         _masterLoginTime = now;
+466:         _masterLoggedIn = true;
+467:       });
+468:       // 等待门店列表合并完成，避免下面判断「已同步门店」时 _configs 还没更新
+469:       if (storesApplyFuture != null) {
+470:         try {
+471:           await storesApplyFuture;
+472:         } catch (_) {}
+473:       }
+474:       if (!storesApplied) {
+475:         await _syncStoresFromMaster();
+476:       }
+477:       // 登录成功后自动刷新供货商列表（与门店同步一致）
+478:       final syncedStores =
+479:           _configs.where((c) => c.enabled && c.storeId.isNotEmpty).toList();
+480:       if (syncedStores.isNotEmpty) {
+481:         await _refreshSuppliersAfterLogin(syncedStores.first);
+482:       }
+483:     }
+484:   }
+485: 
+486:   String _formatNowText() {
+487:     final n = DateTime.now();
+488:     return '${n.year}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')} ${n.hour.toString().padLeft(2, '0')}:${n.minute.toString().padLeft(2, '0')}';
+489:   }
+490: 
+491:   String _normMasterUrl(String url) {
+492:     var u = url.trim();
+493:     if (u.isEmpty) return AppConstants.defaultBaseUrl;
+494:     if (u.startsWith('http://') || u.startsWith('https://')) {
+495:       return u.replaceAll(RegExp(r'/+$'), '');
+496:     }
+497:     return 'https://$u';
+498:   }
+499: 
+500:   /// 用总账号会话从银豹同步门店列表到门店配置（ID数据管理）
+501:   Future<void> _syncStoresFromMaster() async {
+502:     if (_syncingStores) return;
+503:     final baseUrl = _normMasterUrl(_masterBaseUrlCtrl.text);
+504:     final account = _masterAccountCtrl.text.trim();
+505:     final masterKey = '$baseUrl|$account|master';
+506:     final cookie = await widget.sessionManager.getCookie(masterKey);
+507:     if (cookie == null || cookie.isEmpty) {
+508:       if (mounted) {
+509:         ScaffoldMessenger.of(context).showSnackBar(
+510:           const SnackBar(
+511:               content: Text('尚未登录总账号，请先登录'),
+512:               backgroundColor: AppConstants.warningColor),
+513:         );
+514:       }
+515:       return;
+516:     }
+517:     setState(() => _syncingStores = true);
+518:     try {
+519:       final stores =
+520:           await StoreSyncService.fetchStores(baseUrl: baseUrl, cookie: cookie);
+521:       if (!mounted) return;
+522:       if (stores.isEmpty) {
+523:         ScaffoldMessenger.of(context).showSnackBar(
+524:           const SnackBar(
+525:               content: Text('未能从银豹获取门店列表，可能登录已过期'),
+526:               backgroundColor: AppConstants.errorColor),
+527:         );
+528:         return;
+529:       }
+530:       await _applyStores(stores);
+531:     } catch (e) {
+532:       if (mounted) {
+533:         ScaffoldMessenger.of(context).showSnackBar(
+534:           SnackBar(
+535:               content: Text('门店同步失败：$e'),
+536:               backgroundColor: AppConstants.errorColor),
+537:         );
+538:       }
+539:     } finally {
+540:       if (mounted) setState(() => _syncingStores = false);
+541:     }
+542:   }
+543: 
+544:   /// 把提取到的门店列表合并到门店配置：只按门店ID去重合并（不因账号/后台写法差异产生重复），
+545:   /// 保留用户改过的门店名称与勾选状态
+546:   Future<void> _applyStores(List<PospalSubStore> stores) async {
+547:     if (stores.isEmpty) return;
+548:     final baseUrl = _normMasterUrl(_masterBaseUrlCtrl.text);
+549:     final account = _masterAccountCtrl.text.trim();
+550:     // 1) 按门店ID去重
+551:     final seenIds = <String>{};
+552:     final uniqueStores = <PospalSubStore>[];
+553:     for (final s in stores) {
+554:       if (seenIds.contains(s.id)) continue;
+555:       seenIds.add(s.id);
+556:       uniqueStores.add(s);
+557:     }
+558:     // 2) 保留旧配置中用户改过的名称与勾选状态（只按 storeId 匹配）
+559:     final oldByStoreId = <String, StoreConfig>{};
+560:     for (final c in _configs) {
+561:       if (c.storeId.isNotEmpty) {
+562:         oldByStoreId[c.storeId] = c;
+563:       }
+564:     }
+565:     // 3) 完全按本次同步的门店顺序重建列表（不沿用旧顺序），
+566:     //    避免重新同步后门店排序错乱；本次未同步到的旧门店保留在末尾，防止丢失
+567:     final keepIds = uniqueStores.map((s) => s.id).toSet();
+568:     final newConfigs = <StoreConfig>[];
+569:     var added = 0;
+570:     var updated = 0;
+571:     for (final s in uniqueStores) {
+572:       final old = oldByStoreId[s.id];
+573:       if (old != null) {
+574:         newConfigs
+575:             .add(old.copyWith(name: old.name.isNotEmpty ? old.name : s.name));
+576:         updated++;
+577:       } else {
+578:         newConfigs.add(StoreConfig(
+579:           name: s.name,
+580:           account: account,
+581:           baseUrl: baseUrl,
+582:           storeId: s.id,
+583:           enabled: true,
+584:         ));
+585:         added++;
+586:       }
+587:       await widget.sessionManager.saveUserId(
+588:         '$baseUrl|$account|${s.id}',
+589:         s.id,
+590:       );
+591:     }
+592:     // 3.5) 保留本次未同步到的旧门店（提取不全时不丢失）
+593:     for (final c in _configs) {
+594:       if (c.storeId.isNotEmpty && !keepIds.contains(c.storeId)) {
+595:         newConfigs.add(c);
+596:       }
+597:     }
+598:     // 4) 双保险：再次按门店ID去重
+599:     _configs = _dedupeConfigs(newConfigs);
+600:     _storeNameCtrls.clear();
+601:     await widget.configService.saveConfigs(_configs);
+602:     widget.onConfigChanged?.call();
+603:     if (mounted) {
+604:       setState(() {});
+605:       ScaffoldMessenger.of(context).showSnackBar(
+606:         SnackBar(
+607:           content: Text(
+608:               '门店同步完成：共 ${uniqueStores.length} 家门店（新增 $added，更新 $updated），可在下方勾选搜索门店'),
+609:           backgroundColor: AppConstants.successColor,
+610:         ),
+611:       );
+612:     }
+613:   }
+614: 
+615:   /// 勾选/取消门店参与首页搜索
+616:   void _toggleStoreEnabled(int index, bool value) {
+617:     setState(() => _configs[index] = _configs[index].copyWith(enabled: value));
+618:     _autoSaveTimer?.cancel();
+619:     _autoSaveTimer = Timer(const Duration(milliseconds: 500), () {
+620:       widget.configService.saveConfigs(_configs);

@@ -1,0 +1,460 @@
+1: /// 照片后台队列：提交照片后立即返回，App 后台按顺序逐店处理。
+2: /// 失败最多重试 [maxAttempts] 次（带退避）；未登录不计次数并等待登录后继续；
+3: /// 任务持久化，退出登录/杀 App 后仍保留；完成后记录写入 history，
+4: /// 配置页可查看逐店/逐步耗时并手动重试。
+5: library;
+6: 
+7: import 'dart:async';
+8: import 'dart:convert';
+9: import 'dart:io';
+10: import 'package:flutter/foundation.dart';
+11: import 'package:image/image.dart' as img;
+12: import 'package:path_provider/path_provider.dart';
+13: import '../models/store_config.dart';
+14: import 'product_image_cache.dart';
+15: import 'query_service.dart';
+16: 
+17: /// 照片任务来源
+18: enum PhotoJobType { add, restock, sync }
+19: 
+20: extension PhotoJobTypeX on PhotoJobType {
+21:   String get label {
+22:     switch (this) {
+23:       case PhotoJobType.add:
+24:         return '新增照片';
+25:       case PhotoJobType.restock:
+26:         return '补货照片';
+27:       case PhotoJobType.sync:
+28:         return '同步照片';
+29:     }
+30:   }
+31: }
+32: 
+33: /// 任务状态
+34: enum PhotoJobStatus {
+35:   pending,
+36:   processing,
+37:   success,
+38:   partial,
+39:   failed,
+40:   superseded,
+41:   waitingLogin,
+42: }
+43: 
+44: extension PhotoJobStatusX on PhotoJobStatus {
+45:   String get label {
+46:     switch (this) {
+47:       case PhotoJobStatus.pending:
+48:         return '排队中';
+49:       case PhotoJobStatus.processing:
+50:         return '处理中';
+51:       case PhotoJobStatus.success:
+52:         return '成功';
+53:       case PhotoJobStatus.partial:
+54:         return '部分成功';
+55:       case PhotoJobStatus.failed:
+56:         return '已放弃';
+57:       case PhotoJobStatus.superseded:
+58:         return '被取代';
+59:       case PhotoJobStatus.waitingLogin:
+60:         return '等待登录';
+61:     }
+62:   }
+63: 
+64:   bool get isFinished =>
+65:       this == PhotoJobStatus.success ||
+66:       this == PhotoJobStatus.partial ||
+67:       this == PhotoJobStatus.failed ||
+68:       this == PhotoJobStatus.superseded;
+69: 
+70:   bool get canRetry =>
+71:       this == PhotoJobStatus.partial || this == PhotoJobStatus.failed;
+72: }
+73: 
+74: /// 单步耗时记录
+75: class PhotoStep {
+76:   final String name;
+77:   final int ms;
+78:   final String? detail;
+79:   const PhotoStep({required this.name, required this.ms, this.detail});
+80: 
+81:   Map<String, dynamic> toJson() => {
+82:         'name': name,
+83:         'ms': ms,
+84:         'detail': detail,
+85:       };
+86: 
+87:   factory PhotoStep.fromJson(Map<String, dynamic> json) => PhotoStep(
+88:         name: json['name'] as String? ?? '',
+89:         ms: (json['ms'] as num?)?.toInt() ?? 0,
+90:         detail: json['detail'] as String?,
+91:       );
+92: }
+93: 
+94: /// 单店处理结果
+95: class PhotoStoreResult {
+96:   final String storeKey;
+97:   final String storeName;
+98:   final String status; // success / failed / waitingLogin
+99:   final String? imageUrl;
+100:   final String? error;
+101:   final List<PhotoStep> steps;
+102:   final int wallMs;
+103:   const PhotoStoreResult({
+104:     required this.storeKey,
+105:     required this.storeName,
+106:     required this.status,
+107:     this.imageUrl,
+108:     this.error,
+109:     this.wallMs = 0,
+110:     this.steps = const [],
+111:   });
+112: 
+113:   String get statusText {
+114:     switch (status) {
+115:       case 'success':
+116:         return '成功';
+117:       case 'waitingLogin':
+118:         return '未登录';
+119:       default:
+120:         return '失败';
+121:     }
+122:   }
+123: 
+124:   Map<String, dynamic> toJson() => {
+125:         'storeKey': storeKey,
+126:         'storeName': storeName,
+127:         'status': status,
+128:         'imageUrl': imageUrl,
+129:         'error': error,
+130:         'steps': steps.map((e) => e.toJson()).toList(),
+131:         'wallMs': wallMs,
+132:       };
+133: 
+134:   factory PhotoStoreResult.fromJson(Map<String, dynamic> json) =>
+135:       PhotoStoreResult(
+136:         storeKey: json['storeKey'] as String? ?? '',
+137:         storeName: json['storeName'] as String? ?? '',
+138:         status: json['status'] as String? ?? 'failed',
+139:         imageUrl: json['imageUrl'] as String?,
+140:         error: json['error'] as String?,
+141:         steps: ((json['steps'] as List?) ?? const [])
+142:             .map((e) => PhotoStep.fromJson(e as Map<String, dynamic>))
+143:             .toList(),
+144:         wallMs: (json['wallMs'] as num?)?.toInt() ?? 0,
+145:       );
+146: }
+147: 
+148: /// 队列完成事件（供页面刷新图片 / 角标）
+149: class PhotoJobEvent {
+150:   final String jobId;
+151:   final PhotoJobType type;
+152:   final PhotoJobStatus status;
+153:   final String barcode;
+154:   final String? productUid;
+155:   final String? imageUrl;
+156:   final int successCount;
+157:   final int totalStores;
+158:   final List<String> failedStores;
+159:   final int? totalMs;
+160:   const PhotoJobEvent({
+161:     required this.jobId,
+162:     required this.type,
+163:     required this.status,
+164:     required this.barcode,
+165:     this.productUid,
+166:     this.imageUrl,
+167:     required this.successCount,
+168:     required this.totalStores,
+169:     this.failedStores = const [],
+170:     this.totalMs,
+171:   });
+172: 
+173:   bool get fullSuccess =>
+174:       status == PhotoJobStatus.success && failedStores.isEmpty;
+175: }
+176: /// 照片后台队列服务（单例）
+177: class PhotoQueueService {
+178:   PhotoQueueService._();
+179: 
+180:   static final PhotoQueueService instance = PhotoQueueService._();
+181: 
+182:   /// 网络/银豹错误最多重试次数，超过后放弃并记录（未登录不计次数）
+183:   static const int maxAttempts = 5;
+184: 
+185:   /// 配置页日志最多保留条数
+186:   static const int historyCap = 200;
+187: 
+188:   static const List<int> _backoffMs = [5000, 15000, 60000, 60000];
+189: 
+190:   final _PhotoQueueNotifier _notifier = _PhotoQueueNotifier();
+191:   final StreamController<PhotoJobEvent> _events =
+192:       StreamController<PhotoJobEvent>.broadcast();
+193:   QueryService? _queryService;
+194:   bool _pumping = false;
+195:   int _pendingCount = 0;
+196:   int _seq = 0;
+197:   /// 当前是否有任务正在上传（驱动首页“运行中”转圈动画）
+198:   bool _processingActive = false;
+199:   /// 运行中已被新任务取代的任务 id：worker 内存态可能落后于磁盘标记，
+200:   /// 需以此集合为准，避免旧任务继续跑完剩余门店。
+201:   final Set<String> _cancelledIds = <String>{};
+202: 
+203:   ChangeNotifier get notifier => _notifier;
+204:   Stream<PhotoJobEvent> get events => _events.stream;
+205:   int get pendingCount => _pendingCount;
+206:   bool get isProcessingActive => _processingActive;
+207: 
+208:   void addListener(void Function() l) => _notifier.addListener(l);
+209:   void removeListener(void Function() l) => _notifier.removeListener(l);
+210: 
+211:   /// 首页加载完成后绑定 QueryService 并启动消费
+212:   Future<void> attach(QueryService qs) async {
+213:     _queryService = qs;
+214:     await refreshCount();
+215:     start();
+216:   }
+217: 
+218:   Future<void> start() async {
+219:     if (_pumping) return;
+220:     _pumping = true;
+221:     try {
+222:       await _pumpLoop();
+223:     } finally {
+224:       _pumping = false;
+225:     }
+226:   }
+227: 
+228:   /// 照片提交的目标门店：总账号模式(存在门店ID)取全部有效门店；
+229:   /// 门店单独登录模式(1011-1)取已登录有效门店。
+230:   static List<StoreConfig> photoTargetStores(List<StoreConfig> configs) {
+231:     final hasMaster = configs.any((c) => c.storeId.isNotEmpty);
+232:     if (hasMaster) {
+233:       return configs.where((c) => c.storeId.isNotEmpty || c.isValid).toList();
+234:     }
+235:     return configs.where((c) => c.isValid).toList();
+236:   }
+237: 
+238:   // ==================== 入队 ====================
+239: 
+240:   /// 入队一张照片任务。[imageBytes] 与 [sourceUrl] 二选一：
+241:   /// 新照片传字节（本地压缩后落盘）；同步已有照片传 CDN 原图地址（Worker 下载）。
+242:   Future<PhotoJob> enqueue({
+243:     required PhotoJobType type,
+244:     required String barcode,
+245:     required String productName,
+246:     String? productUid,
+247:     List<int>? imageBytes,
+248:     String? sourceUrl,
+249:     String opName = '',
+250:     bool writeDesc = false,
+251:     required List<StoreConfig> stores,
+252:   }) async {
+253:     if (stores.isEmpty) {
+254:       throw StateError('没有可同步的有效门店');
+255:     }
+256:     final code = barcode.trim();
+257:     if (code.isEmpty) throw StateError('条码为空');
+258:     if ((imageBytes == null) == (sourceUrl == null)) {
+259:       throw StateError('必须且只能提供 imageBytes 或 sourceUrl 之一');
+260:     }
+261: 
+262:     // 同商品(条码+uid)合并：丢弃旧任务只跑最新
+263:     final oldJobs = await _loadQueue();
+264:     for (final dup in oldJobs) {
+265:       if (dup.barcode != code ||
+266:           (dup.productUid ?? '') != (productUid ?? '') ||
+267:           dup.status.isFinished) {
+268:         continue;
+269:       }
+270:       if (dup.status == PhotoJobStatus.processing) {
+271:         dup.superseded = true;
+272:         _cancelledIds.add(dup.id);
+273:         await _saveQueueJob(dup);
+274:       } else {
+275:         await _deleteImage(dup);
+276:         await _deleteQueueFile(dup.id);
+277:       }
+278:     }
+279: 
+280:     final now = DateTime.now();
+281:     final id =
+282:         '${now.millisecondsSinceEpoch}_${(_seq++).toString().padLeft(3, '0')}';
+283:     String? fileName;
+284:     if (imageBytes != null) {
+285:       final compressed = compressForUpload(Uint8List.fromList(imageBytes));
+286:       fileName = '$id.jpg';
+287:       final file =
+288:           File('${(await _imgDir()).path}${Platform.pathSeparator}$fileName');
+289:       await file.writeAsBytes(compressed, flush: true);
+290:     }
+291: 
+292:     final job = PhotoJob(
+293:       id: id,
+294:       type: type,
+295:       barcode: code,
+296:       productName: productName,
+297:       productUid: productUid,
+298:       opName: opName,
+299:       opDesc: _actionDesc(type),
+300:       writeDesc: writeDesc,
+301:       createdAt: now,
+302:       status: PhotoJobStatus.pending,
+303:       imageFile: fileName,
+304:       sourceUrl: sourceUrl,
+305:       stores: List.of(stores),
+306:     );
+307:     await _saveQueueJob(job);
+308:     await refreshCount();
+309:     _notify();
+310:     start();
+311:     return job;
+312:   }
+313: 
+314:   static String _actionDesc(PhotoJobType type) {
+315:     switch (type) {
+316:       case PhotoJobType.add:
+317:       case PhotoJobType.restock:
+318:         return '更新照片';
+319:       case PhotoJobType.sync:
+320:         return '同步照片';
+321:     }
+322:   }
+323: 
+324:   // ==================== 查询 ====================
+325: 
+326:   Future<List<PhotoJob>> pendingJobs() => _loadQueue();
+327: 
+328:   Future<List<PhotoJob>> historyJobs() => _loadHistory();
+329: 
+330:   /// 该商品(条码+uid)是否已有排队/处理中的任务
+331:   Future<bool> hasActiveJob(String barcode, String? productUid) async {
+332:     final jobs = await _loadQueue();
+333:     return jobs.any((j) =>
+334:         j.barcode == barcode &&
+335:         (j.productUid ?? '') == (productUid ?? '') &&
+336:         !j.status.isFinished);
+337:   }
+338: 
+339:   /// 队列 + 历史（时间倒序），供配置页展示
+340:   Future<List<PhotoJob>> allJobs() async {
+341:     final q = await _loadQueue();
+342:     final h = await _loadHistory();
+343:     final all = [...q, ...h];
+344:     all.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+345:     return all;
+346:   }
+347: 
+348:   Future<void> refreshCount() async {
+349:     final jobs = await _loadQueue();
+350:     _pendingCount = jobs.length;
+351:     _processingActive = jobs.any((j) => j.status == PhotoJobStatus.processing);
+352:   }
+353: 
+354:   // ==================== 人工操作 ====================
+355: 
+356:   /// 重试一条已放弃/部分成功的任务（需本地图片仍在或有源URL）
+357:   Future<String?> retryJob(String id) async {
+358:     final jobs = await _loadHistory();
+359:     PhotoJob? job;
+360:     for (final j in jobs) {
+361:       if (j.id == id) {
+362:         job = j;
+363:         break;
+364:       }
+365:     }
+366:     if (job == null) return '未找到该记录';
+367:     _cancelledIds.remove(id);
+368:     if (!job.canRetryNow) {
+369:       return '该记录的图片已清理，无法自动重试，请重新拍照提交';
+370:     }
+371:     job.status = PhotoJobStatus.pending;
+372:     job.attempts = 0;
+373:     job.nextAttemptAt = 0;
+374:     job.finishedAt = null;
+375:     job.totalMs = null;
+376:     job.results = [];
+377:     await _deleteHistoryFile(job.id);
+378:     await _saveQueueJob(job);
+379:     await refreshCount();
+380:     _notify();
+381:     start();
+382:     return null;
+383:   }
+384: 
+385:   /// 删除一条记录（队列或历史），并清理其本地图片文件
+386:   Future<void> deleteJob(String id) async {
+387:     _cancelledIds.remove(id);
+388:     await _deleteQueueFile(id);
+389:     await _deleteHistoryFile(id);
+390:     try {
+391:       final f =
+392:           File('${(await _imgDir()).path}${Platform.pathSeparator}$id.jpg');
+393:       if (await f.exists()) await f.delete();
+394:     } catch (_) {}
+395:     await refreshCount();
+396:     _notify();
+397:   }
+398: 
+399:   /// 清空历史日志（含图片）
+400:   Future<void> clearHistory() async {
+401:     final jobs = await _loadHistory();
+402:     for (final j in jobs) {
+403:       await deleteJob(j.id);
+404:     }
+405:     _notify();
+406:   }
+407:   // ==================== 后台处理 ====================
+408: 
+409:   Future<void> _pumpLoop() async {
+410:     while (_pumping) {
+411:       final qs = _queryService;
+412:       if (qs == null) break;
+413:       final jobs = await _loadQueue();
+414:       if (jobs.isEmpty) break;
+415: 
+416:       // 崩溃/杀进程恢复：处理中被中断的任务回到排队重跑；已被取代的收尾归档
+417:       for (final j in jobs) {
+418:         if (j.superseded) {
+419:           await _finishSuperseded(j);
+420:         } else if (j.status == PhotoJobStatus.processing) {
+421:           j.status = PhotoJobStatus.pending;
+422:           j.nextAttemptAt = 0;
+423:           await _saveQueueJob(j);
+424:         }
+425:       }
+426: 
+427:       final nowMs = DateTime.now().millisecondsSinceEpoch;
+428:       PhotoJob? todo;
+429:       int? soonest;
+430:       for (final j in jobs) {
+431:         if (j.status == PhotoJobStatus.pending && j.nextAttemptAt <= nowMs) {
+432:           todo = j;
+433:           break;
+434:         }
+435:         if (j.status == PhotoJobStatus.pending && j.nextAttemptAt > nowMs) {
+436:           if (soonest == null || j.nextAttemptAt < soonest) {
+437:             soonest = j.nextAttemptAt;
+438:           }
+439:         }
+440:       }
+441: 
+442:       if (todo == null) {
+443:         // 无待办：可能在退避，也可能在等待登录（Cookie 恢复后自动转回排队）
+444:         var anyWaiting = false;
+445:         for (final j in jobs) {
+446:           if (j.status != PhotoJobStatus.waitingLogin) continue;
+447:           anyWaiting = true;
+448:           for (final s in j.stores) {
+449:             if (await qs.hasSessionCookie(s)) {
+450:               j.status = PhotoJobStatus.pending;
+451:               j.nextAttemptAt = 0;
+452:               await _saveQueueJob(j);
+453:               todo = j;
+454:               break;
+455:             }
+456:           }
+457:           if (todo != null) break;
+458:         }
+459:         if (todo == null) {
+460:           final waitMs = soonest != null

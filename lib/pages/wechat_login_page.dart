@@ -1,0 +1,714 @@
+import 'dart:async';
+import 'dart:collection';
+import 'dart:convert';
+import 'dart:io' show Platform;
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import '../services/login_diag.dart';
+import '../services/session_manager.dart';
+import '../services/store_sync_service.dart';
+import '../utils/constants.dart';
+
+/// 微信扫码登录页（移植自 smart_eye_stock 的登录方式）
+///
+/// 原理：
+/// 1. 用 WebView 打开银豹后台商品管理页；
+/// 2. 打开前先把本地已保存的 Cookie 注入 WebView —— 如果会话仍有效，
+///    会直接进入商品管理页，免扫码；
+/// 3. 若会话失效，页面会跳到登录页，用户用另一台手机微信扫码完成 OAuth
+///    授权，页面自动跳回 /Product/Manage；
+/// 4. 检测到登录成功后，把 WebView 里的完整 Cookie 抓出来保存到本地，
+///    之后查询直接带该 Cookie 请求银豹接口，长期有效、无需反复登录。
+///
+/// 门店提取时机（与 smart_eye_stock 一致）：
+/// 只在页面加载完成（onLoadStop）之后才做登录验证与门店提取，
+/// 避免 URL 变化事件在页面还没渲染时就用旧 Cookie 误判登录成功，
+/// 导致提取门店时页面是空的（iOS 上更明显）。
+class WechatLoginPage extends StatefulWidget {
+  final String baseUrl;
+  final String storeKey;
+  final SessionManager sessionManager;
+  final ValueChanged<String> onLoggedIn;
+  final void Function(List<PospalSubStore> stores)? onStoresLoaded;
+  final String? account;
+  final String? employee;
+  final String? password;
+  /// 自动填充使用的登录方式：'job'=员工工号登录，'account'=账号密码登录
+  final String authMethod;
+
+  const WechatLoginPage({
+    super.key,
+    required this.baseUrl,
+    required this.storeKey,
+    required this.sessionManager,
+    required this.onLoggedIn,
+    this.onStoresLoaded,
+    this.account,
+    this.employee,
+    this.password,
+    this.authMethod = 'job',
+  });
+
+  @override
+  State<WechatLoginPage> createState() => _WechatLoginPageState();
+}
+
+class _WechatLoginPageState extends State<WechatLoginPage> {
+  InAppWebViewController? _ctrl;
+  bool _loading = true;
+  bool _loggedIn = false;
+  bool _loginAttempting = false;
+  bool _storesLoaded = false;
+  bool _pageReady = false;
+
+  /// Dart 侧会话守护定时器：不依赖页面 JS 轮询，周期性验证登录会话是否已生效
+  Timer? _watchTimer;
+
+  static const _oauthKeywords = [
+    'oauth',
+    'wechat',
+    'authorize',
+    'open.weixin',
+    'mp.weixin',
+    'wxopen',
+    'user.pospal.cn',
+  ];
+
+  static const String _ua =
+      'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+
+  static String _norm(String url) =>
+      url.trim().replaceAll(RegExp(r'/+$'), '');
+
+  Future<void> _diag(String msg) async {
+    await LoginDiagLogger().log(msg);
+  }
+
+  bool _isOAuthPage(String url) {
+    final lower = url.toLowerCase();
+    return _oauthKeywords.any((kw) => lower.contains(kw));
+  }
+
+  /// 把本地已保存的 Cookie 注入 WebView，再导航到商品管理页
+  Future<void> _seedAndLoad(InAppWebViewController c) async {
+    try {
+      final saved = await widget.sessionManager.getCookie(widget.storeKey);
+      if (saved != null && saved.isNotEmpty) {
+        final base = WebUri(_norm(widget.baseUrl));
+        final host = Uri.parse(_norm(widget.baseUrl)).host;
+        for (final part in saved.split(';')) {
+          final idx = part.indexOf('=');
+          if (idx <= 0) continue;
+          try {
+            await CookieManager.instance().setCookie(
+              url: base,
+              name: part.substring(0, idx).trim(),
+              value: part.substring(idx + 1).trim(),
+              path: '/',
+              domain: host,
+            );
+          } catch (_) {}
+        }
+        await _diag('已注入本地Cookie ${saved.split(';').length} 条');
+      } else {
+        await _diag('本地无保存的Cookie，直接打开登录页');
+      }
+    } catch (_) {}
+    c.loadUrl(
+      urlRequest: URLRequest(
+        url: WebUri('${_norm(widget.baseUrl)}/Product/Manage'),
+      ),
+    );
+  }
+
+  /// OAuth 中间页 http -> https（微信授权要求 https）
+  Future<NavigationActionPolicy?> _onUrlOverride(
+    InAppWebViewController c,
+    NavigationAction action,
+  ) async {
+    final u = action.request.url.toString();
+    if (u.startsWith('http://user.pospal.cn')) {
+      final httpsUrl = u.replaceFirst('http://', 'https://');
+      c.loadUrl(urlRequest: URLRequest(url: WebUri(httpsUrl)));
+      return NavigationActionPolicy.CANCEL;
+    }
+    return NavigationActionPolicy.ALLOW;
+  }
+
+  void _onUpdateVisitedHistory(
+    InAppWebViewController c,
+    Uri? url,
+    bool? reload,
+  ) {
+    if (_loggedIn || url == null) return;
+    // 与 smart_eye_stock 一致：页面未加载完成前不做登录检测，
+    // 避免 URL 刚变化（页面还是空的）时就触发提取
+    if (!_pageReady) return;
+    final u = url.toString();
+    if (_isOAuthPage(u)) return;
+    if (_isAuthPage(u)) _injectFill();
+    if (u.contains('/Product/Manage') || u.contains('/product/manage')) {
+      _tryLogin(currentUrl: u);
+    }
+  }
+
+  void _onLoadStop(InAppWebViewController c, Uri? url) {
+    if (url == null) return;
+    final u = url.toString();
+    _pageReady = true;
+    setState(() => _loading = false);
+    if (_isOAuthPage(u)) return;
+    if (_isAuthPage(u)) _injectFill();
+    if (u.contains('/Product/Manage') || u.contains('/product/manage')) {
+      // 已登录但门店还没提取到：页面这次重新加载完成，正好从新 DOM 提取
+      if (_loggedIn && !_storesLoaded) {
+        _scheduleStoreRetry();
+        return;
+      }
+      _tryLogin(currentUrl: u);
+    } else if (_loggedIn && !_storesLoaded && !_loginAttempting) {
+      // 已登录但当前不在商品资料页（如停在登录页/OAuth 回调页）：
+      // 主动导航回 /Product/Manage，再重新提取门店（模仿 smart_eye_stock）
+      // _tryLogin 正在处理登录/导航时不重复导航，避免双次跳转卡在加载中
+      _navigateBackToProductPage();
+    }
+  }
+
+  /// 已登录但当前页面不在商品资料页时，主动导航回去再提取门店
+  Future<void> _navigateBackToProductPage() async {
+    if (_ctrl == null || _storesLoaded) return;
+    await _diag('已登录但不在商品资料页，主动导航回 /Product/Manage');
+    try {
+      await _ctrl!.loadUrl(urlRequest: URLRequest(
+          url: WebUri('${_norm(widget.baseUrl)}/Product/Manage')));
+    } catch (_) {}
+  }
+
+  void _onJsDetect(List<dynamic> args) {
+    if (_loggedIn || !_pageReady) return;
+    try {
+      final data = args.isNotEmpty ? args[0] as String : '';
+      if (_isOAuthPage(data)) return;
+      if (_isAuthPage(data)) _injectFill();
+      _tryLogin(currentUrl: data);
+    } catch (_) {}
+  }
+
+  /// Dart 侧守护：每3秒检查一次当前页面并验证会话（页面 JS 轮询失效时的兜底），
+  /// 登录成功后自动停止
+  void _startWatchTimer() {
+    _watchTimer?.cancel();
+    _watchTimer = Timer.periodic(const Duration(seconds: 3), (t) async {
+      if (!mounted || _loggedIn) {
+        t.cancel();
+        return;
+      }
+      if (_ctrl == null || !_pageReady) return;
+      try {
+        final cur = (await _ctrl!.getUrl())?.toString() ?? '';
+        if (cur.isEmpty || _isOAuthPage(cur)) return;
+        // 登录页自动填充（防漏：页面 load 事件未触发时也能自动登录）
+        if (_isAuthPage(cur)) _injectFill();
+        await _tryLogin(currentUrl: cur);
+      } catch (_) {}
+    });
+  }
+
+  @override
+  void dispose() {
+    _watchTimer?.cancel();
+    super.dispose();
+  }
+
+  /// 判断是否银豹登录页（用于自动填充工号密码）
+  bool _isAuthPage(String url) {
+    final lower = url.toLowerCase();
+    return lower.contains('signin') ||
+        lower.contains('/login') ||
+        lower.contains('/account');
+  }
+
+  /// 自动填充并提交登录（与配置页登录方式一致）：
+  /// authMethod='job' 走员工工号登录（账号+员工工号+工号密码），
+  /// 'account' 走账号密码登录（账号+登录密码）
+  Future<void> _injectFill() async {
+    if (_ctrl == null) return;
+    final accountJs = jsonEncode(widget.account ?? '');
+    final employeeJs = jsonEncode(widget.employee ?? '');
+    final passwordJs = jsonEncode(widget.password ?? '');
+    final useJob = widget.authMethod != 'account';
+    await _ctrl!.evaluateJavascript(source: '''
+      (function(){
+        if(window.__cashcarry_filled) return;
+        var useJob = ${useJob ? 'true' : 'false'};
+        // 切到对应登录 tab：工号登录 data-type="2" / 账号登录 data-type="1"；
+        // 已是选中状态则不重复点击（避免误触发页面切换逻辑）
+        var clickTab=function(){
+          var sel=useJob?'span[data-type="2"]':'span[data-type="1"]';
+          var t=document.querySelector(sel);
+          if(t){
+            if((t.className||'').indexOf('selected')<0){t.click();}
+            return true;
+          }
+          var nodes=document.querySelectorAll('span,li,a,div,label');
+          var targetText=useJob?'工号登录':'账号登录';
+          for(var i=0;i<nodes.length;i++){
+            var txt=(nodes[i].textContent||'').trim();
+            if(txt===targetText||(txt.indexOf(targetText)>=0&&txt.length<=6)){
+              nodes[i].click();
+              return true;
+            }
+          }
+          return false;
+        };
+        // 工号登录需要工号输入行可见才算切换成功；账号登录无工号栏，直接通过
+        var targetRowOk=function(){
+          if(!useJob) return true;
+          var j=document.getElementById('txt_cashierJobName');
+          if(!j) return false;
+          var p=j.parentElement;
+          return p && p.style.display!=='none';
+        };
+        // 轮询等待登录表单渲染完成后自动填充并提交（最多 15 次 × 500ms）
+        var tryFill=function(times){
+          var pw=document.querySelectorAll('input[type="password"]');
+          var a=document.getElementById('txt_userName')||document.querySelector('input[placeholder*="账号"]');
+          if(pw.length===0||!a){
+            if(times<15) setTimeout(function(){tryFill(times+1);},500);
+            return;
+          }
+          if(!targetRowOk()){clickTab();}
+          if(!targetRowOk()){
+            if(times<15) setTimeout(function(){tryFill(times+1);},500);
+            return;
+          }
+          window.__cashcarry_filled=true;
+          if($accountJs !== ''){a.value=$accountJs;a.dispatchEvent(new Event('input',{bubbles:true}));a.dispatchEvent(new Event('change',{bubbles:true}));}
+          if(useJob){
+            var j=document.getElementById('txt_cashierJobName');
+            if(j && $employeeJs !== ''){j.value=$employeeJs;j.dispatchEvent(new Event('input',{bubbles:true}));j.dispatchEvent(new Event('change',{bubbles:true}));}
+          }
+          for(var i=0;i<pw.length;i++){pw[i].value=$passwordJs;pw[i].dispatchEvent(new Event('input',{bubbles:true}));pw[i].dispatchEvent(new Event('change',{bubbles:true}));}
+          setTimeout(function(){
+            // 银豹登录按钮是 div#submitLoginBtn（jQuery 绑定 click），优先点击它
+            var btn=document.getElementById('submitLoginBtn')||document.querySelector('button[type="submit"]')||document.querySelector('input[type="submit"]')||document.querySelector('button.btn-primary')||document.querySelector('a.btn-primary')||document.querySelector('button[class*="login"]')||document.querySelector('button[class*="submit"]')||document.querySelector('a[class*="login"]')||document.querySelector('div.submitLoginBtn');
+            if(btn)btn.click();else{var fs=document.querySelectorAll('form');for(var f=0;f<fs.length;f++)try{fs[f].submit()}catch(e){}}
+          },400);
+        };
+        clickTab();
+        setTimeout(function(){tryFill(0);},400);
+      })();
+    ''');
+  }
+
+  /// 从当前页面 DOM 提取门店列表
+  /// 1) 精确选择器（与智能眼一致）重试 3 次
+  /// 2) 宽泛选择器 + 轮询等待（下拉框延迟渲染兜底）
+  /// 3) 始终再用 HTTP 抓取一次，与 JS 结果按门店ID合并去重，
+  ///    保证即使页面下拉框只渲染了部分门店，也能补齐全量门店
+  Future<List<PospalSubStore>> _extractStores(String cookie) async {
+    final merged = <String, PospalSubStore>{};
+    void merge(List<PospalSubStore> list) {
+      for (final s in list) {
+        merged.putIfAbsent(s.id, () => s);
+      }
+    }
+
+    // 1) 精确选择器，重试 3 次
+    for (int attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (_ctrl != null) {
+          final result = await _ctrl!.evaluateJavascript(
+            source: StoreSyncService.jsExtractStores,
+          ).timeout(const Duration(seconds: 8));
+          final raw = result?.toString() ?? 'null';
+          final stores = StoreSyncService.parseStoresValue(result);
+          await _diag('JS精确提取(第${attempt + 1}次): $raw → ${stores.length}个');
+          if (stores.isNotEmpty) {
+            merge(stores);
+            break;
+          }
+        }
+      } catch (e) {
+        await _diag('JS精确提取异常(第${attempt + 1}次): $e');
+      }
+      if (attempt < 2) {
+        await Future.delayed(const Duration(milliseconds: 600));
+      }
+    }
+    // 2) 宽泛选择器 + 轮询等待
+    try {
+      if (_ctrl != null) {
+        final result = await _ctrl!.callAsyncJavaScript(
+          functionBody: StoreSyncService.jsExtractStoresPoll,
+        ).timeout(const Duration(seconds: 10));
+        final raw = result?.value?.toString() ?? 'null';
+        final stores = StoreSyncService.parseStoresValue(result?.value);
+        await _diag('JS宽泛轮询提取: $raw → ${stores.length}个');
+        if (stores.isNotEmpty) merge(stores);
+      }
+    } catch (e) {
+      await _diag('JS宽泛轮询提取异常: $e');
+    }
+    // 3) HTTP 提取：始终执行，用于补齐 JS 漏掉的门店
+    try {
+      final stores = await StoreSyncService.fetchStores(
+        baseUrl: _norm(widget.baseUrl),
+        cookie: cookie,
+      );
+      await _diag('HTTP提取: ${stores.length}个');
+      merge(stores);
+    } catch (e) {
+      await _diag('HTTP提取异常: $e');
+    }
+    await _diag('门店提取合并结果: ${merged.length}个');
+    return merged.values.toList();
+  }
+
+  /// 登录成功后门店为空时，延迟重试提取（等页面下拉框渲染完成）
+  void _scheduleStoreRetry() {
+    Future.delayed(const Duration(milliseconds: 1500), () async {
+      if (!mounted || !_loggedIn || _storesLoaded || _ctrl == null) return;
+      await _diag('登录成功后延迟重试提取门店');
+      try {
+        final ck = await widget.sessionManager.getCookie(widget.storeKey);
+        if (ck == null || ck.isEmpty) return;
+        final stores = await _extractStores(ck);
+        if (!mounted || _storesLoaded) return;
+        if (stores.isNotEmpty) {
+          _storesLoaded = true;
+          widget.onStoresLoaded?.call(stores);
+        } else {
+          // 再补一次
+          await Future.delayed(const Duration(milliseconds: 2000));
+          if (!mounted || !_loggedIn || _storesLoaded || _ctrl == null) return;
+          final ck2 = await widget.sessionManager.getCookie(widget.storeKey);
+          if (ck2 == null || ck2.isEmpty) return;
+          final s2 = await _extractStores(ck2);
+          if (!mounted || _storesLoaded) return;
+          if (s2.isNotEmpty) {
+            _storesLoaded = true;
+            widget.onStoresLoaded?.call(s2);
+          }
+        }
+      } catch (_) {}
+    });
+  }
+
+  Future<void> _tryLogin({String currentUrl = '', bool manual = false}) async {
+    if (_loggedIn || _loginAttempting) return;
+    _loginAttempting = true;
+    try {
+      await _diag('开始登录验证 currentUrl=$currentUrl manual=$manual');
+      final ck = await _extractCookies();
+      if (ck == null || ck.isEmpty) {
+        await _diag('未提取到 Cookie，等待扫码…');
+        if (manual) _showError('未检测到登录信息，请确认已在微信中完成扫码验证');
+        return;
+      }
+      // 关键：验证会话真实有效，防止二维码登录页的残留 Cookie 被误判为登录成功
+      Map<String, dynamic>? report;
+      var valid = await StoreSyncService.validateCookie(
+        baseUrl: _norm(widget.baseUrl),
+        cookie: ck,
+        onReport: (r) => report = r,
+      );
+      await _diag('Cookie验证报告: ${jsonEncode(report ?? const {})}');
+
+      // 登录成功后，会话可能尚未完全落定（首次登录时更明显）：
+      // 稍等片刻重新抓取一份更完整的 Cookie，并再次验证，
+      // 避免保存到不完整会话导致只能看到主店、看不到分店
+      var finalCk = ck;
+      if (valid) {
+        for (int i = 0; i < 3; i++) {
+          await Future.delayed(const Duration(milliseconds: 1000));
+          final fresh = await _extractCookies();
+          if (fresh == null || fresh.isEmpty) break;
+          // Cookie 不再变长说明会话已稳定，无需再等
+          if (fresh.length <= finalCk.length) break;
+          final ok2 = await StoreSyncService.validateCookie(
+            baseUrl: _norm(widget.baseUrl),
+            cookie: fresh,
+          );
+          if (ok2) {
+            finalCk = fresh;
+            await _diag('会话落定后重新抓取 Cookie: ${finalCk.length}字符');
+            break;
+          }
+        }
+      }
+
+      // 从页面 DOM 提取门店：页面若已进入 /Product/Manage，
+      // DOM 里的门店下拉框就是「确实已登录」的最可靠证据（iOS 上
+      // HTTP 验证可能因 Cookie 同步延迟而失败，但页面其实已登录）
+      var stores = await _extractStores(finalCk);
+
+      if (!valid && stores.isEmpty) {
+        await _diag('验证未通过且页面无门店数据，等待扫码…');
+        if (manual) _showError('未检测到有效登录，请用微信完成扫码后重试');
+        return;
+      }
+
+      // 门店下拉框是页面加载后异步渲染的：首次登录时可能还没渲染完，
+      // 弹回配置页前多等几次，确保拿到全部门店（避免只显示一个门店）
+      if (stores.isEmpty) {
+        await _diag('门店下拉框可能未渲染完，等待重试…');
+        for (int i = 0; i < 4 && stores.isEmpty; i++) {
+          await Future.delayed(const Duration(seconds: 2));
+          if (!mounted) return;
+          stores = await _extractStores(finalCk);
+        }
+      }
+
+      await widget.sessionManager.saveCookie(widget.storeKey, finalCk, via: 'wechat');
+      widget.onLoggedIn(finalCk);
+      _loggedIn = true;
+      await _diag('登录成功，Cookie ${finalCk.length} 字符，提取门店 ${stores.length}个');
+
+      // 登录成功后确保停留在商品资料页：若当前不在（如停在登录页/OAuth 中间页，
+      // 即使 URL 带 returnUrl 也不算在商品资料页），主动导航到 /Product/Manage 并等待
+      // 页面真正加载完成，再重新提取门店（模仿 smart_eye_stock）
+      if (_ctrl != null) {
+        String cur = '';
+        try {
+          cur = (await _ctrl!.getUrl())?.toString() ?? '';
+        } catch (_) {}
+        final onProduct = !_isAuthPage(cur) && !_isOAuthPage(cur) &&
+            (cur.contains('/Product/Manage') || cur.contains('/product/manage'));
+        if (!onProduct) {
+          await _diag('当前不在商品资料页，主动导航后重新提取门店');
+          await _ctrl!.loadUrl(urlRequest: URLRequest(
+              url: WebUri('${_norm(widget.baseUrl)}/Product/Manage')));
+          // 等待页面真正加载到商品资料页（最多10秒，首次登录网络慢时也能等到）
+          for (int i = 0; i < 20 && !_storesLoaded; i++) {
+            await Future.delayed(const Duration(milliseconds: 500));
+            if (!mounted) return;
+            try {
+              final now = (await _ctrl!.getUrl())?.toString() ?? '';
+              if (now.contains('/Product/Manage') ||
+                  now.contains('/product/manage')) {
+                break;
+              }
+            } catch (_) {
+              break;
+            }
+          }
+          if (!mounted) return;
+          if (!_storesLoaded) {
+            stores = await _extractStores(finalCk);
+          }
+        }
+      }
+
+      if (!_storesLoaded && stores.isNotEmpty) {
+        _storesLoaded = true;
+        widget.onStoresLoaded?.call(stores);
+      } else if (!_storesLoaded) {
+        // 门店还没提取到：多等一会儿，尽量在弹回配置页前把门店列表拿到
+        _scheduleStoreRetry();
+        for (int i = 0; i < 12 && !_storesLoaded; i++) {
+          await Future.delayed(const Duration(milliseconds: 500));
+          if (!mounted) return;
+        }
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('登录成功，会话已保存（长期有效）'),
+          backgroundColor: AppConstants.successColor,
+          duration: Duration(seconds: 2),
+        ),
+      );
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (mounted) Navigator.of(context).pop(true);
+    } finally {
+      _loginAttempting = false;
+    }
+  }
+
+  /// 从 WebView 抓取该域名下的完整 Cookie（多来源取最长，重试 6 次）
+  Future<String?> _extractCookies() async {
+    for (int attempt = 0; attempt < 6; attempt++) {
+      if (attempt > 0) await Future.delayed(const Duration(milliseconds: 500));
+      String? best;
+      int bestLen = 0;
+      String bestSource = '';
+      // 1) CookieManager（插件，iOS 读 WKWebsiteDataStore）
+      try {
+        final cs = await CookieManager.instance()
+            .getCookies(url: WebUri(_norm(widget.baseUrl)));
+        if (cs.isNotEmpty) {
+          final ck = cs.map((c) => '${c.name}=${c.value}').join('; ');
+          if (ck.length > bestLen) {
+            best = ck;
+            bestLen = ck.length;
+            bestSource = 'CookieManager(${cs.length}个)';
+          }
+        }
+      } catch (_) {}
+      // 2) iOS 原生通道（直接读 WKWebsiteDataStore）
+      if (Platform.isIOS) {
+        try {
+          const ch = MethodChannel('com.cashcarry/cookies');
+          final ck = await ch.invokeMethod('getCookies', {
+            'url': _norm(widget.baseUrl),
+          }) as String?;
+          if (ck != null && ck.isNotEmpty && ck.length > bestLen) {
+            best = ck;
+            bestLen = ck.length;
+            bestSource = 'iOS原生通道';
+          }
+        } catch (_) {}
+      }
+      // 3) document.cookie（不含 HttpOnly，最后手段）；
+      //    仅当 WebView 当前页面属于本后台域名时采用，避免把 OAuth 中间页
+      //    （user.pospal.cn）的 Cookie 误当成本后台会话
+      if (attempt >= 2 && _ctrl != null) {
+        try {
+          String curUrl = '';
+          try {
+            curUrl = (await _ctrl!.getUrl())?.toString() ?? '';
+          } catch (_) {}
+          final host = Uri.parse(_norm(widget.baseUrl)).host;
+          if (curUrl.contains(host)) {
+            final ck = await _ctrl!.evaluateJavascript(
+                source: 'document.cookie') as String?;
+            if (ck != null && ck.isNotEmpty && ck.length > bestLen) {
+              best = ck;
+              bestLen = ck.length;
+              bestSource = 'document.cookie';
+            }
+          }
+        } catch (_) {}
+      }
+      if (best != null && best.isNotEmpty) {
+        await _diag('Cookie来源(第${attempt + 1}次): $bestSource，${best.length}字符');
+        return best;
+      }
+    }
+    await _diag('Cookie 提取失败（6次均无结果）');
+    return null;
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: AppConstants.errorColor,
+        duration: const Duration(seconds: 4),
+      ),
+    );
+  }
+
+  /// 复制诊断日志到剪贴板（供发回排查）
+  Future<void> _copyDiagLogs() async {
+    try {
+      final text = await LoginDiagLogger().exportText();
+      await Clipboard.setData(ClipboardData(text: text));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('诊断日志已复制到剪贴板，请粘贴发回'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    } catch (_) {}
+  }
+
+  /// window.open 拦截：银豹某些弹窗用 window.open，直接跳当前页
+  static const String _openOverrideScript = '''
+window.open=function(u,t,f){if(u&&typeof u==="string"&&u!==""&&u!=="about:blank"){window.location.href=u;}return window;};
+''';
+
+  /// JS 轮询：页面 URL 变化或检测到 Cookie 时通知 Flutter
+  static const String _jsPollingScript = '''
+(function(){
+  if(window.__smarteye_polling) return;
+  window.__smarteye_polling = true;
+
+  var _lastUrl = window.location.href;
+  var _checkCount = 0;
+
+  setInterval(function(){
+    _checkCount++;
+    var currentUrl = window.location.href;
+
+    if (currentUrl !== _lastUrl) {
+      _lastUrl = currentUrl;
+      window.flutter_inappwebview.callHandler("onJsDetect", currentUrl);
+      return;
+    }
+
+    if (_checkCount % 5 === 0) {
+      // 周期性上报当前页面：AJAX 登录成功后登录表单可能仍停留在页面，
+      // 不能只依赖「表单消失 + Cookie 存在」判断（首次登录卡住的关键），
+      // 由 Flutter 侧每次验证会话是否已生效
+      window.flutter_inappwebview.callHandler("onJsDetect", currentUrl);
+    }
+  }, 1000);
+})();
+''';
+
+  @override
+  Widget build(BuildContext context) {
+    // 页面只保留网页与诊断日志，不显示任何登录/扫码说明
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('登录', style: TextStyle(fontSize: 16)),
+        actions: [
+          TextButton.icon(
+            onPressed: _copyDiagLogs,
+            icon: const Icon(Icons.bug_report_outlined, size: 15),
+            label: const Text('诊断日志', style: TextStyle(fontSize: 12)),
+            style: TextButton.styleFrom(
+              foregroundColor: AppConstants.textSecondary,
+            ),
+          ),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.only(right: 8),
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+        ],
+      ),
+      body: SizedBox.expand(
+        child: InAppWebView(
+          initialUrlRequest: null, // 等 Cookie 注入后再导航
+          initialSettings: InAppWebViewSettings(
+            javaScriptEnabled: true,
+            userAgent: _ua,
+            sharedCookiesEnabled: true,
+          ),
+          initialUserScripts: UnmodifiableListView([
+            UserScript(
+              source: _openOverrideScript,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+            ),
+            UserScript(
+              source: _jsPollingScript,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_END,
+            ),
+          ]),
+          onWebViewCreated: (c) {
+            _ctrl = c;
+            _seedAndLoad(c);
+            c.addJavaScriptHandler(
+                handlerName: 'onJsDetect', callback: _onJsDetect);
+            _startWatchTimer();
+          },
+          shouldOverrideUrlLoading: _onUrlOverride,
+          onUpdateVisitedHistory: _onUpdateVisitedHistory,
+          onLoadStop: _onLoadStop,
+        ),
+      ),
+    );
+  }
+}

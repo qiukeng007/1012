@@ -1,0 +1,221 @@
+=== 9140-9250 ===
+9140:         })
+9141: 
+9142:         return isValid;
+9143:     },
+9144: 
+9145:     checkUnitStandard: function () {
+9146:         var isValid = true;
+9147: 
+9148:         if (!hasNeedUnitStandard) return isValid;
+9149: 
+9150:         var isWeighing = this.edit_sb_isWeighing && this.edit_sb_isWeighing.getSelectedValue() == "1";
+9151:         var isBarcodeScale = this.edit_sb_isBarcodeScale && this.edit_sb_isBarcodeScale.getSelectedValue() == "1" && this.edit_countingSelector && this.edit_countingSelector.getSelectedValue() == "0";
+9152: 
+9153:         if (isWeighing || isBarcodeScale) {
+9154:             var baseUnitText = this.edit_baseUnitSelector.getSelectedText();
+9155:             //baseUnitText转小写
+9156:             baseUnitText = (baseUnitText || '').toLowerCase();
+9157:             if (baseUnitText != "kg" && baseUnitText != "KG" && baseUnitText != "Kg" && baseUnitText != "kG"
+9158:                 && baseUnitText != "g" && baseUnitText != "G"
+9159:                 && baseUnitText != "mg" && baseUnitText != "Mg" && baseUnitText != "mG" && baseUnitText != "MG"
+9160:                 && baseUnitText != "t" && baseUnitText != "T"
+9161:                 && baseUnitText != "市斤" && baseUnitText != "公斤" && baseUnitText != "斤"
+9162:                 && baseUnitText != "千克" && baseUnitText != "克" && baseUnitText != "毫克"
+9163:                 && baseUnitText != "两" && baseUnitText != "吨"
+9164:                 && baseUnitText != "磅" && baseUnitText != "500g" && baseUnitText != "1000g"
+9165:                 && baseUnitText != "lb"
+9166:             ) {
+9167:                 isValid = false;
+9168:                 var baseUnitUid = this.edit_baseUnitSelector.getSelectedValue();
+9169:                 if (baseUnitUid == "") {
+9170:                     new pospal.ui.msgBox({ autoCloseSec: 0, content: "当前商品已设置称重商品，单位必填，请选择对应的重量单位" });
+9171:                 } else {
+9172:                     new pospal.ui.msgBox({ autoCloseSec: 0, content: "当前商品已设置称重商品，单位必须为重量单位，请修改" });
+9173:                 }
+9174:             }
+9175:         }
+9176: 
+9177:         return isValid;
+9178:     },
+9179: 
+9180:     saveProduct: function () {
+9181:         var _this = this;
+9182: 
+9183:         if (this.formValidator.isValid() && this.checkProductUnitExchange() && this.checkMoreWholesalePrice() && this.checkMoreSpec() && this.checkMulColorSize() && this.checkAtLeastMinutes() && this.checkIsBindPassProduct() && this.checkIsWeighingBardoe() && this.checkProductExtBarcodes() && this.checkCustomerSpecialPrice() && this.checkUnitStandard()) {
+9184:             var url;
+9185:             var data;
+9186:             var product;
+9187:             var products;
+9188:             var caseproducts = null;
+9189:             var specProductOrders = null;
+9190:             var validproduct = this.buildProduct();
+9191:             var profit = validproduct.sellPrice - validproduct.buyPrice;
+9192:             if (profit < -900000 || profit > 99999999.99) {
+9193:                 new pospal.ui.msgBox({
+9194:                     autoCloseSec: 0, content: "利润异常，请检查所填商品售价或进价"
+9195:                 });
+9196:                 return;
+9197:             }
+9198: 
+9199:             if ((!$("#edit_mulcolorsize_item").is(":hidden") || $("#editArea").data("id") != 0) && this.edit_mulcolorsize_enable.getSelectedValue() == "1") {
+9200:                 products = this.buildMulColorSizeProducts();
+9201:                 url = "/Product/SaveProducts";
+9202:                 data = {
+9203:                     "productsJson": JSON.stringify(products), "caseproductsJson": "", "isMulColorSize": true
+9204:                 };
+9205:             } else if (!$("#moreSpecSettingDiv").is(":hidden") && _this.edit_sb_moreSpec.getSelectedValue() == "1") {
+9206:                 var moreSpecProducts = this.buildMoreSpecProducts();
+9207:                 products = moreSpecProducts.products;
+9208:                 caseproducts = moreSpecProducts.caseproducts;
+9209:                 specProductOrders = moreSpecProducts.specProductOrders;
+9210:                 url = "/Product/SaveProducts";
+9211:                 data = {
+9212:                     "productsJson": JSON.stringify(products), "caseproductsJson": JSON.stringify(caseproducts), "specProductOrders": JSON.stringify(specProductOrders), "isMulColorSize": false
+9213:                 };
+9214:             } else {
+9215:                 product = this.buildProduct();
+9216:                 if (product.buyPrice && (product.buyPrice + '').indexOf('e') > -1) {
+9217:                     //处理bug Could not convert string to decimal: 6.7e-7. Path 'buyPrice', line 1, position 183.
+9218:                     product.buyPrice = (parseFloat(product.buyPrice) || 0).toFixed(8).toG0();
+9219:                 }
+9220:                 url = "/Product/SaveProduct";
+9221:                 data = {
+9222:                     "productJson": JSON.stringify(product)
+9223:                 };
+9224:             }
+9225:             var dtds = [];
+9226:             if (hasCheckDataForDisableProductAuth) {
+9227:                 dtds.push(this.checkDataForDisableProductAuth());
+9228:             }
+9229:             else {
+9230:                 dtds.push(this.checkDisableHasAvailablePromotionCombo());
+9231:             }
+9232:             $.when.apply($, dtds).done(function () {
+9233:                 var doing = new pospal.ui.loading($("#editArea"));
+9234:                 pospal.ajax({
+9235:                     url: url,
+9236:                     data: data,
+9237:                     success: function (result) {
+9238:                         if (!result.successed) {
+9239:                             new pospal.ui.msgBox({
+9240:                                 content: result.msg,
+9241:                                 autoCloseSec: 0
+9242:                             });
+9243:                         } else {
+9244:                             var isEditMulColorSizeProducts = (!$("#edit_mulcolorsize_item").is(":hidden") || $("#editArea").data("id") != 0) && _this.edit_mulcolorsize_enable.getSelectedValue() == "1";
+9245:                             var isEditMoreSpecProducts = !$("#moreSpecSettingDiv").is(":hidden") && _this.edit_sb_moreSpec.getSelectedValue() == "1";
+9246:                             if (isEditMulColorSizeProducts || isEditMoreSpecProducts) {
+9247:                                 var modifiedMoreSpecProdcuts = result.modifiedMoreSpecProdcuts;
+9248:                                 //多规格标记添加的已存在商品
+9249:                                 if (isEditMoreSpecProducts && modifiedMoreSpecProdcuts.length > 0) {
+9250:                                     for (var i = products.length - 1; i >= 0; i--) {
+=== 9490-9545 ===
+9490:         $("#editImageDiv").show();
+9491: 
+9492:         if (this.uploader == null) this.buildUploader();
+9493:     },
+9494: 
+9495:     hide: function () {
+9496:         $("#popupBg").hide();
+9497:         $("#editImageDiv").hide();
+9498:     },
+9499: 
+9500:     resetUI: function () {
+9501:         $("#editImageDiv .imgUl").html("");
+9502:         $("#editImageDiv .imgUl").width(0);
+9503: 
+9504:         $("#uploadImageNames").val(lang.tryGet("选择上传图片"));
+9505:         $("#uploadMsg").html("<i>导入图片文件格式为.jpg/.jpeg/.png，图片文件大小不超过3M，最佳上传尺寸为 750×750正方形</i>");
+9506:         $("#uploadImagesPercent").css("width", "0%");
+9507:     },
+9508: 
+9509:     buildUploader: function () {
+9510:         var _this = this;
+9511: 
+9512:         var opts = {
+9513:         };
+9514:         opts.browse_button = "btnPickImages";
+9515:         opts.url = "/Product/UploadProductImage";
+9516:         opts.multi_selection = true;
+9517:         opts.max_file_size = $("#maxExcelExt").val() + 'mb';
+9518:         opts.extensions = "jpg,jpeg,png";
+9519:         opts.PostInit = function (up) {
+9520:             $("#btnUploadImages").bind("click", function () {
+9521:                 if (up.files.length == 0) {
+9522:                     $("#uploadMsg").html("<b>" + lang.tryGet("提示选择图片") + "</b>");
+9523:                     $("#uploadImageNames").val(lang.tryGet("选择上传图片"));
+9524:                 } else {
+9525:                     up.settings.url = "/Product/UploadProductImage?userId=" + userSelector.getSelectedValue() + "&productId=" + $("#editArea").data("id") + "&forMulColorSize=" + $("#editArea").data("isMulColorSize");
+9526:                     up.start();
+9527:                     up.disableBrowse(true);
+9528:                 }
+9529:                 return false;
+9530:             });
+9531:         }
+9532: 
+9533:         opts.FilesAdded = function (up, files) {
+9534:             var isValid = true;
+9535: 
+9536:             var liNum = $("#editImageDiv .imgUl li").length;
+9537:             if (liNum + files.length > 5) {
+9538:                 isValid = false;
+9539:                 new pospal.ui.msgBox({ content: "商品图片不能超过5张，请确认！", autoCloseSec: 0 });
+9540:                 $.each(files, function (i, file) {
+9541:                     up.removeFile(file.id);
+9542:                 })
+9543:             }
+9544: 
+9545:             if (isValid) {
+=== 5740-5790 ===
+5740:             var pluLength = scalePluCodeLength == 4 ? 4 : 5;
+5741:             if ($(this).val() == "" && (barcode.length == 5 || barcode.length == 7) && barcode.length >= pluLength) {
+5742:                 $(this).val(barcode.substr(barcode.length - pluLength, pluLength));
+5743:             }
+5744:         });
+5745: 
+5746:         $("#btnShowPrinterList").bind("click", function () {
+5747:             if (hasCatePrinterSetting) {
+5748:                 editPrinterV2.show();
+5749:             }
+5750:             else {
+5751:                 _this.showPrinterList();
+5752:             }
+5753:         });
+5754: 
+5755:         $("#btnShowLabelPrinterList").bind("click", function () {
+5756:             _this.showLabelPrinterList();
+5757:         });
+5758: 
+5759:         $("#printerList .popupClose, #printerList .confirm").bind("click", function () {
+5760:             _this.hidePrinterList();
+5761:         });
+5762: 
+5763:         //隐藏标签机
+5764:         $("#labelPrinterList .popupClose, #labelPrinterList .confirm").bind("click", function () {
+5765:             _this.hideLabelPrinterList();
+5766:         });
+5767: 
+5768:         $(".editBottom .save").bind("click", function () {
+5769:             _this.saveProduct();
+5770:         });
+5771: 
+5772:         $(".editBottom .del").bind("click", function () {
+5773:             _this.deleteProduct();
+5774:         });
+5775: 
+5776:         $("#showExtBarcodes").bind("click", function () {
+5777:             var extBarcodes = JSON.parse(JSON.stringify($("#editArea").data("productExtBarcodes")));
+5778:             var barcode = $("#edit_barcode").val().trim();
+5779:             var id = $("#editArea").data("id");
+5780:             editExtBarcode.show();
+5781:             editExtBarcode.bindData(barcode, extBarcodes, id == "0");
+5782:         });
+5783: 
+5784:         $(document).on("click", "#unitExChangeList .requestUnit", function () {
+5785:             if ($(this).hasClass("on")) {
+5786:                 $(this).removeClass("on");
+5787:             } else {
+5788:                 $("#unitExChangeList .requestUnit").removeClass("on");
+5789:                 $(this).addClass("on");
+5790:             }

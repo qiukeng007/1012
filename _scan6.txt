@@ -1,0 +1,131 @@
+9200:                 products = this.buildMulColorSizeProducts();
+9201:                 url = "/Product/SaveProducts";
+9202:                 data = {
+9203:                     "productsJson": JSON.stringify(products), "caseproductsJson": "", "isMulColorSize": true
+9204:                 };
+9205:             } else if (!$("#moreSpecSettingDiv").is(":hidden") && _this.edit_sb_moreSpec.getSelectedValue() == "1") {
+9206:                 var moreSpecProducts = this.buildMoreSpecProducts();
+9207:                 products = moreSpecProducts.products;
+9208:                 caseproducts = moreSpecProducts.caseproducts;
+9209:                 specProductOrders = moreSpecProducts.specProductOrders;
+9210:                 url = "/Product/SaveProducts";
+9211:                 data = {
+9212:                     "productsJson": JSON.stringify(products), "caseproductsJson": JSON.stringify(caseproducts), "specProductOrders": JSON.stringify(specProductOrders), "isMulColorSize": false
+9213:                 };
+9214:             } else {
+9215:                 product = this.buildProduct();
+9216:                 if (product.buyPrice && (product.buyPrice + '').indexOf('e') > -1) {
+9217:                     //处理bug Could not convert string to decimal: 6.7e-7. Path 'buyPrice', line 1, position 183.
+9218:                     product.buyPrice = (parseFloat(product.buyPrice) || 0).toFixed(8).toG0();
+9219:                 }
+9220:                 url = "/Product/SaveProduct";
+9221:                 data = {
+9222:                     "productJson": JSON.stringify(product)
+9223:                 };
+9224:             }
+9225:             var dtds = [];
+9226:             if (hasCheckDataForDisableProductAuth) {
+9227:                 dtds.push(this.checkDataForDisableProductAuth());
+9228:             }
+9229:             else {
+9230:                 dtds.push(this.checkDisableHasAvailablePromotionCombo());
+9231:             }
+9232:             $.when.apply($, dtds).done(function () {
+9233:                 var doing = new pospal.ui.loading($("#editArea"));
+9234:                 pospal.ajax({
+9235:                     url: url,
+9236:                     data: data,
+9237:                     success: function (result) {
+9238:                         if (!result.successed) {
+9239:                             new pospal.ui.msgBox({
+9240:                                 content: result.msg,
+9241:                                 autoCloseSec: 0
+9242:                             });
+9243:                         } else {
+9244:                             var isEditMulColorSizeProducts = (!$("#edit_mulcolorsize_item").is(":hidden") || $("#editArea").data("id") != 0) && _this.edit_mulcolorsize_enable.getSelectedValue() == "1";
+9245:                             var isEditMoreSpecProducts = !$("#moreSpecSettingDiv").is(":hidden") && _this.edit_sb_moreSpec.getSelectedValue() == "1";
+9246:                             if (isEditMulColorSizeProducts || isEditMoreSpecProducts) {
+9247:                                 var modifiedMoreSpecProdcuts = result.modifiedMoreSpecProdcuts;
+9248:                                 //多规格标记添加的已存在商品
+9249:                                 if (isEditMoreSpecProducts && modifiedMoreSpecProdcuts.length > 0) {
+9250:                                     for (var i = products.length - 1; i >= 0; i--) {
+9251:                                         var item = products[i];
+9252:                                         var modifiedProduct = $.grep(modifiedMoreSpecProdcuts, function (item2) {
+9253:                                             return item2.barcode.toLowerCase() == item.barcode.toLowerCase();
+9254:                                         })
+9255:                                         if (modifiedProduct.length > 0) {
+9256:                                             products.splice(i, 1);
+9257:                                             products.push(JSON.parse(JSON.stringify(modifiedProduct[0])));
+9258:                                         }
+9259:                                     }
+9260:                                 }
+9261:                                 if (result.isNewProducts) {
+9262:                                     if (hasNewProductInfoAuth) _this.saveNewProductClickCount();
+9263:                                     $("#txt_keyword").val(products[0].attribute5);
+9264:                                     if (result.syncStores.length > 0) {
+9265:                                         if (result.isOldArtNo) {
+9266:                                             $.each(products, function (index, item) {
+9267:                                                 item.attribute5 = null;
+9268:                                                 item.attribute8 = null;
+9269:                                             });
+9270:                                         }
+9271:                                         sync.confirmAddProductsToStores(result.syncStores, products, products[0].userId, caseproducts, specProductOrders);
+9272:                                     }
+9273:                                 } else {
+9274:                                     layout.showOrHideEditArea(false);
+9275:                                     if (result.syncStores.length > 0) {
+9276:                                         sync.confirmUpdateProductsToStores(result.syncStores, products, products[0].userId, caseproducts, specProductOrders);
+9277:                                     } else {
+9278:                                         new pospal.ui.msgBox(lang.tryGet("商品修改成功"));
+9279:                                     }
+9280:                                 }
+9281:                             } else {
+9282:                                 if (product.id == 0) {
+9283:                                     if (hasNewProductInfoAuth) _this.saveNewProductClickCount();
+9284:                                     $("#txt_keyword").val(product.barcode);
+9285:                                     if (result.syncStores.length > 0) {
+9286:                                         if (result.hasEditProductAuth) {
+9287:                                             sync.confirmAddProductToStores(result.syncStores, product, product.userId);
+9288:                                         }
+9289:                                     }
+9290:                                 } else {
+9291:                                     layout.showOrHideEditArea(false);
+9292:                                     if (result.syncStores.length > 0) {
+9293:                                         sync.confirmUpdateProductToStores(result.syncStores, product, product.userId);
+9294:                                     } else {
+9295:                                         new pospal.ui.msgBox(lang.tryGet("商品修改成功"));
+9296:                                     }
+9297:                                 }
+9298:                             }
+9299: 
+9300:                             loadCurrentQueryProducts(true);
+9301:                         }
+9302:                     },
+9303:                     complete: function () {
+9304:                         doing.destroy();
+9305:                     }
+9306:                 });
+9307:             });
+9308:         }
+9309:     },
+9310: 
+9311:     saveNewProductClickCount: function () {
+9312:         var now = new Date();
+9313:         if (startNewProductTime) {
+9314:             clickCount.save("4000014", Math.floor((now.getTime() - startNewProductTime.getTime()) / 1000).toString());
+9315:             startNewProductTime = null;
+9316:         }
+9317:         else {
+9318:             clickCount.save("4000015", "2");
+9319:         }
+9320:         clickCount.save("4000013", "4");
+9321:     },
+9322: 
+9323:     deleteProduct: function () {
+9324:         var _this = this;
+9325:         var productId = $("#editArea").data("id");
+9326:         var isDefaultSpecProduct = $("#editArea").data("isDefaultSpecProduct") == "1";
+9327:         var isMulColorSizeProduct = $("#editArea").data("isMulColorSize");
+9328:         var bindPassProducts = $("#editArea").data("bindPassProducts");
+9329:         var isPassPromotionProduct = $("#editArea").data("isPassPromotionProduct");
+9330:         var spu = $("#editArea").data("spu");

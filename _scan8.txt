@@ -1,0 +1,60 @@
+32: var hasProductAttribute9;
+70: hasProductAttribute9 = hasCombProductItem || hasProductPackingAttribute || hasNewProductInfoAuth;
+1276: query.attribute9 = "2";
+1279: query.attribute9 = "3";
+1285: query.attribute9 = "1";
+2302: if (hasProductAttribute9) syncAttributeList.push("attribute9");
+6257: $("#editArea").data("attribute9", isCombProduct ? 1 : null);
+6459: $("#editArea").data("spu", product.attribute5);
+6460: $("#editArea").data("isDefaultSpecProduct", product.attribute7);
+6465: $("#editArea").data("attribute9", product.attribute9);
+7013: var baseSpecProduct = product.attribute7 == "1" ? product : null;
+7015: index = pospal.inArray(moreSpecProducts, "attribute7", "1");
+7026: if (product.attribute7 != "1") $("#btn_add_spec,#btn_select_spec,#btn_order_spec").hide();
+7685: var isCombProduct = $("#editArea").data("attribute9");
+8197: product.attribute9 = $("#editArea").data("attribute9");
+8570: product.attribute5 = product.attribute4;
+8571: //product.attribute7 = index == 0 ? "1" : "0";
+8666: defaultProduct.attribute5 = spuCode;
+8675: product.attribute5 = spuCode;
+8677: product.attribute9 = hasNewCaseProductForRetail && hasExchange ? '5' : null;
+8736: defaultProduct.attribute7 = "1";
+8738: defaultProduct.attribute7 = $("#editArea").data("isDefaultSpecProduct");
+9263: $("#txt_keyword").val(products[0].attribute5);
+9264: if (result.syncStores.length > 0) {
+9267: item.attribute5 = null;
+9271: sync.confirmAddProductsToStores(result.syncStores, products, products[0].userId, caseproducts, specProductOrders);
+9275: if (result.syncStores.length > 0) {
+9276: sync.confirmUpdateProductsToStores(result.syncStores, products, products[0].userId, caseproducts, specProductOrders);
+9285: if (result.syncStores.length > 0) {
+9287: sync.confirmAddProductToStores(result.syncStores, product, product.userId);
+9292: if (result.syncStores.length > 0) {
+9293: sync.confirmUpdateProductToStores(result.syncStores, product, product.userId);
+9350: "productId": productId, "getSyncStores": true
+9356: if (result.syncStores.length > 0) {
+9357: sync.confirmDelProductToStores(result.syncStores, result.barcode);
+10289: attributeList.push("attribute5");
+10290: attributeList.push("attribute7");
+10291: if (hasProductAttribute9) attributeList.push("attribute9");
+10337: attributeList.push("attribute5");
+10338: attributeList.push("attribute7");
+10339: if (hasProductAttribute9) attributeList.push("attribute9");
+10385: attributeList.push("attribute5");
+10386: attributeList.push("attribute7");
+10387: if (hasProductAttribute9) attributeList.push("attribute9");
+10611: if (_this.allSyncStores) {
+10612: _this.updateSyncStoreSelector();
+10622: _this.allSyncStores = result.stores;
+10623: _this.updateSyncStoreSelector();
+10634: updateSyncStoreSelector: function () {
+10660: options: $.extend(true, [], _this.allSyncStores),
+11370: "userId": userSelector.getSelectedValue(), "uid": uid, "parentCategoryName": "", "categoryName": categoryName, categoryType: 2, "getSyncStores": false
+11680: _this.loadSyncStores();
+11727: loadSyncStores: function () {
+11732: url: "/Account/LoadSyncStores",
+12815: if (actionParams.syncStores.length > 0) {
+12816: sync.confirmDelProductToStores(actionParams.syncStores, actionParams.barcode);
+12825: if (actionParams.syncStores.length > 0) {
+12826: sync.confirmAddMoreSpecProductsToStores(actionParams.syncStores, actionParams.products, actionParams.fromUserId, actionParams.caseproducts);
+12830: if (actionParams.syncStores.length > 0) {
+12832: sync.confirmUpdateMoreSpecProductsToStores(actionParams.syncStores, actionParams.products, actionParams.fromUserId, actionParams.caseproducts, actionParams.deleteProductBarcodes);

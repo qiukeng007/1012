@@ -1,0 +1,161 @@
+10460:             _this.hide();
+10461:             if (fromActionPage) {
+10462:                 new pospal.ui.msgBox({
+10463:                     content: lang.tryGet("同步完成"), autoCloseSec: 0, onClose: function () {
+10464:                         actionPage.clearFormParams();
+10465:                     }
+10466:                 });
+10467:             }
+10468:             else {
+10469:                 new pospal.ui.msgBox({ content: lang.tryGet("同步完成"), autoCloseSec: 0 });
+10470:             }
+10471:         });
+10472:     },
+10473: 
+10474:     batchUrl: [
+10475:         {
+10476:             url: "/Product/CopyNewProductToStores", batchUrl: "/Product/BatchCopyNewProductToStores"
+10477:         },
+10478:         {
+10479:             url: "/Product/SyncUpdateProductToStores", batchUrl: "/Product/BatchSyncUpdateProductToStores"
+10480:         },
+10481:         {
+10482:             url: "/Product/DeleteStoreProduct", batchUrl: "/Product/BatchDeleteStoreProduct"
+10483:         },
+10484:         {
+10485:             url: "/Product/CopyNewProductsToStores", batchUrl: "/Product/BatchCopyNewProductsToStores"
+10486:         },
+10487:         {
+10488:             url: "/Product/SyncUpdateProductsToStores", batchUrl: "/Product/BatchSyncUpdateProductsToStores"
+10489:         }
+10490:     ],
+10491: 
+10492:     ajaxSyncToStoresV2: function (url, data, limit) {
+10493:         var that = this;
+10494:         that.SyncedNum = 0;
+10495:         var toStoreIds = this.getSelectedStoreIds();
+10496: 
+10497:         var toStoreIdGroups = [];
+10498:         pospal.forEachInBatches(toStoreIds, function (tmp) {
+10499:             toStoreIdGroups.push(tmp);
+10500:         }, limit);
+10501: 
+10502:         var okNum = 0;
+10503:         var doing = new pospal.ui.loading($("#syncDiv"), true);
+10504:         pospal.concurrentAjax(toStoreIdGroups, function ajaxPost(gUserIds) {
+10505:             data.userIds = gUserIds;
+10506:             var $lis = $("#syncDiv .copyStore ul li").filter(function () {
+10507:                 var liStoreId = $(this).find("div[data]").attr("data");
+10508:                 return !!pospal.find(gUserIds, function (it) {
+10509:                     return it == liStoreId
+10510:                 })
+10511:             });
+10512: 
+10513:             $lis.find("em.info").html(lang.tryGet("进行中"));
+10514:             $("#syncDiv .mCustomScrollbar").mCustomScrollbar('scrollTo', $lis.eq(0), {
+10515:                 scrollInertia: 600
+10516:             });
+10517:             return pospal.ajax({
+10518:                 url: url,
+10519:                 data: data,
+10520:                 success: function (result) {
+10521:                     that.SyncedNum++;
+10522:                     if (result.successed) {
+10523:                         $.each(result.results, function (i, item) {
+10524:                             var $li = $("#syncDiv ul div[data=" + item.userId + "]").parent().parent().parent();
+10525:                             var innerResult = item.result.Data;
+10526:                             if (innerResult.successed) {
+10527:                                 $li.find("em.info").html(lang.tryGet("已完成"));
+10528:                                 okNum++;
+10529:                             } else {
+10530:                                 $li.find("em.info").html("同步失败");
+10531:                                 $li.addClass("error").data("error", innerResult.msg.replace("\\n", "\n"));
+10532:                             }
+10533:                         });
+10534:                     } else {
+10535:                         $lis.find("em.info").html("同步失败");
+10536:                         $lis.addClass("error").data("error", result.msg.replace("\\n", "\n"));
+10537:                     }
+10538:                     that.buildProcessUI();
+10539:                 }
+10540:             });
+10541:         }, 1).then(function () {
+10542:             doing.destroy();
+10543:             var failedNum = toStoreIds.length - okNum;
+10544:             if (failedNum == 0) {
+10545:                 new pospal.ui.msgBox({ content: lang.tryGet("同步完成"), autoCloseSec: 0 });
+10546:                 that.hide();
+10547:             } else {
+10548:                 new pospal.ui.msgBox({ content: "同步失败", autoCloseSec: 0 });
+10549:             }
+10550:         });
+10551:     },
+10552: 
+10553:     getLimit: function (toStoreIds) {
+10554:         if (toStoreIds.length > 3000) return 20;
+10555:         return 1;
+10556:     },
+10557: 
+10558:     getSelectedStoreIds: function () {
+10559:         var selectedStoreIds = [];
+10560:         if (this.toStoreSelector) selectedStoreIds = this.toStoreSelector.getSelectedUserIds(true);
+10561:         var excludeStoreId = userSelector.getSelectedValue();
+10562:         var index = pospal.findIndex(selectedStoreIds, function (n) { return n == excludeStoreId; });
+10563:         if (index > -1) selectedStoreIds.splice(index, 1);
+10564:         return selectedStoreIds;
+10565:     },
+10566: 
+10567:     buildProcessUI: function () {
+10568:         var allStoreNum = this.getSelectedStoreIds().length;
+10569:         var currentIndex = this.SyncedNum;
+10570: 
+10571:         var percent = currentIndex == 0 ? "0" : Math.ceil(currentIndex * 100 / allStoreNum).toString();
+10572: 
+10573:         $("#syncDiv .processDiv").html('进度：{0}/{1} = {2}%'.WrapPts().format(currentIndex, allStoreNum, percent));
+10574:     },
+10575: 
+10576:     saveUserJob: function (postData) {
+10577:         var _this = this;
+10578:         var loading = new pospal.ui.loading($("#syncDiv"), true);
+10579:         pospal.ajax({
+10580:             url: "/Product/SaveUserJobCondition",
+10581:             data: postData,
+10582:             success: function (result) {
+10583:                 if (result.successed) {
+10584:                     _this.hide();
+10585:                     userJobApp.showGuideMsgBox("已提交任务同步商品到选中门店，请等待系统处理。");
+10586:                 } else {
+10587:                     new pospal.ui.msgBox(result.message || result.msg);
+10588:                 }
+10589:             },
+10590:             complete: function () {
+10591:                 loading.destroy();
+10592:             }
+10593:         });
+10594:     },
+10595: 
+10596:     filtStores: function () {
+10597:         var keyword = $("#syncDiv .storeKeyword").val().trim().toLowerCase();
+10598:         if (keyword == this.defaultKeyword) keyword == "";
+10599: 
+10600:         var filtedStores = this.stores;
+10601:         if (keyword.length > 0) {
+10602:             filtedStores = $.grep(this.stores, function (item, index) {
+10603:                 return item.text.toLowerCase().indexOf(keyword) > -1
+10604:             });
+10605:         }
+10606:         this.bulidStoreList(filtedStores, this.action, true);
+10607:     },
+10608: 
+10609:     loadSyncStore: function () {
+10610:         var _this = this;
+10611:         if (_this.allSyncStores) {
+10612:             _this.updateSyncStoreSelector();
+10613:         }
+10614:         else {
+10615:             $(".loading").hide();
+10616:             var doing = new pospal.ui.loading($("#syncDiv"));
+10617:             pospal.ajax({
+10618:                 url: "/Account/LoadSubStoresByUserIdDDLJson",
+10619:                 data: { userId: currentUserId, withSelf: true, withParent: true, withCreatedDatetime: pospal.getStoreCount(storeOptions) > 2000, simple: true },
+10620:                 success: function (result) {

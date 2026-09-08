@@ -1,0 +1,141 @@
+60:       request.headers.set('Accept', 'text/html,application/xhtml+xml');
+61:       request.headers.set('Cookie', cookie);
+62:       request.followRedirects = false;
+63:       final response = await request.close().timeout(const Duration(seconds: 8));
+64:       await _readBody(response);
+65:     } catch (_) {}
+66:   }
+67: 
+68:   /// 总账号模式直接使用门店ID（并切店预热），旧工号模式回退 _getUserId
+69:   Future<String?> _resolveStoreUserId(StoreConfig store, String cookie) async {
+70:     final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+71:     final userId = store.storeId.isNotEmpty
+72:         ? store.storeId
+73:         : await _getUserId(baseUrl, store.storeKey, cookie);
+74:     if (store.storeId.isNotEmpty && !_warmedStores.contains(store.storeId)) {
+75:       _warmedStores.add(store.storeId);
+76:       await _warmStoreSession(baseUrl, store.storeId, cookie);
+77:     }
+78:     return userId;
+79:   }
+80: 
+81: 
+82:   /// 读取缓存的 门店→条码→商品ID（先按 uid 精确匹配，再按条码兜底）
+83:   String? getCachedProductId(StoreConfig store, String barcode, dynamic uid) {
+84:     final code = barcode.trim();
+85:     if (uid != null) {
+86:       final exact = _productIdCache['${store.storeKey}|$code|$uid'];
+87:       if (exact != null && exact.isNotEmpty) return exact;
+88:     }
+89:     final fallback = _productIdCache['${store.storeKey}|$code|'];
+90:     return (fallback == null || fallback.isEmpty) ? null : fallback;
+91:   }
+92: 
+93:   /// 释放 HttpClient 资源
+94:   void dispose() {
+95:     _httpClient.close();
+96:   }
+97: 
+98:   /// 查询单个门店的条码
+99:   /// [timer] 可选，用于记录每步耗时诊断
+100:   Future<ProductResult> queryByBarcode(
+101:     StoreConfig store,
+102:     String barcode, {
+103:     QueryStepTimer? timer,
+104:   }) async {
+105:     final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+106:     final code = barcode.trim();
+107:     if (code.isEmpty) {
+108:       timer?.record('参数校验', detail: '条码为空');
+109:       return const ProductResult(ok: false, error: '请输入商品条码');
+110:     }
+111: 
+112:     timer?.record('加载Cookie');
+113:     final cookie = await _sessionManager.getCookie(store.storeKey);
+114:     if (cookie == null || cookie.isEmpty) {
+115:       timer?.record('加载Cookie', detail: '未找到cookie');
+116:       return const ProductResult(ok: false, error: '未登录，请先在设置里登录（工号/账号密码）');
+117:     }
+118: 
+119:     try {
+120:       // Step 1: 获取 userId——总账号同步模式直接使用门店ID，缓存仅在缺失时兜底
+121:       final userId = store.storeId.isNotEmpty
+122:           ? store.storeId
+123:           : await _getUserId(baseUrl, store.storeKey, cookie, timer: timer);
+124:       if (userId == null) {
+125:         timer?.record('获取userId', detail: '失败');
+126:         return ProductResult(
+127:           ok: false,
+128:           error: '${store.name} 无法获取门店信息，请重新登录',
+129:         );
+130:       }
+131: 
+132:       // Step 2: 先切到目标门店会话（微信扫码后会话默认停在总店，需切店后查询才返回该店库存）
+133:       if (store.storeId.isNotEmpty && !_warmedStores.contains(store.storeId)) {
+134:         _warmedStores.add(store.storeId);
+135:         await _warmStoreSession(baseUrl, store.storeId, cookie);
+136:       }
+137: 
+138:       // Step 3: 调用 LoadProductsByPage 搜索条码
+139:       final referer = '$baseUrl/Product/Manage';
+140:       final pageData = _encodeForm({
+141:         'userId': userId,
+142:         'enable': '1',
+143:         'productTagUidsJson': '[]',
+144:         'keyword': code,
+145:         'groupBySpu': 'false',
+146:         'categorysJson': '[]',
+147:         'supplierUid': '',
+148:         'categoryType': '',
+149:         'pageIndex': '1',
+150:         'pageSize': '20',
+151:         'orderColumn': '',
+152:         'asc': 'true',
+153:       });
+154: 
+155:       final uri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
+156:       final request = await _httpClient.postUrl(uri);
+157:       request.headers.set('User-Agent', _ua);
+158:       request.headers.set('Accept', 'application/json, text/javascript, */*');
+159:       request.headers.set('Referer', referer);
+160:       request.headers.set('Origin', baseUrl);
+161:       request.headers.set('X-Requested-With', 'XMLHttpRequest');
+162:       request.headers.set('Content-Type',
+163:           'application/x-www-form-urlencoded; charset=UTF-8');
+164:       request.headers.set('Cookie', cookie);
+165:       request.followRedirects = false;
+166: 
+167:       request.write(pageData);
+168: 
+169:       final response = await request.close().timeout(const Duration(seconds: 15));
+170:       final statusCode = response.statusCode;
+171:       final body = await _readBody(response);
+172:       timer?.record('POST搜索', detail: 'HTTP $statusCode, 响应${body.length}字节');
+173: 
+174:       // 检查是否登录失效
+175:       if (statusCode == 302 || statusCode == 301) {
+176:         final location = response.headers.value('location') ?? '';
+177:         if (RegExp(r'signin|login', caseSensitive: false).hasMatch(location)) {
+178:           timer?.record('会话检查', detail: 'cookie过期需重登');
+179:           // 清除过期 cookie 和 userId 缓存
+180:           await _sessionManager.deleteCookie(store.storeKey);
+181:           return ProductResult(
+182:             ok: false,
+183:             error: '${store.name} 登录已失效，请重新登录',
+184:           );
+185:         }
+186:       }
+187: 
+188:       if (statusCode != 200) {
+189:         timer?.record('HTTP状态', detail: '非200: $statusCode');
+190:         return ProductResult(
+191:           ok: false,
+192:           error: '${store.name} 查询失败 (HTTP $statusCode)',
+193:         );
+194:       }
+195: 
+196:       // 解析 JSON 响应
+197:       Map<String, dynamic> data;
+198:       try {
+199:         data = jsonDecode(body) as Map<String, dynamic>;
+200:       } catch (_) {
