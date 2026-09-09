@@ -2031,7 +2031,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                       controller: _barcodeController,
                       focusNode: _barcodeFocus,
                       enabled: !_dataBusy,
-                      keyboardType: TextInputType.number,
+                      keyboardType: TextInputType.text,
                       decoration: InputDecoration(
                         hintText: '扫描或输入条码',
                         isDense: true,
