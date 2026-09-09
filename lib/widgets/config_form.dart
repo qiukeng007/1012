@@ -61,13 +61,42 @@ class _ConfigFormState extends State<ConfigForm> {
               ),
           ]),
           const SizedBox(height: 10),
+          Row(children: [
+            const Text('登录方式',
+                style: TextStyle(
+                    fontSize: 13, color: AppConstants.textSecondary)),
+            const Spacer(),
+            ChoiceChip(
+              label: const Text('账号密码登录', style: TextStyle(fontSize: 12)),
+              selected: widget.config.loginMethod == 'account',
+              onSelected: (_) => widget.onChanged(
+                  widget.config.copyWith(loginMethod: 'account')),
+              visualDensity: VisualDensity.compact,
+            ),
+            const SizedBox(width: 6),
+            ChoiceChip(
+              label: const Text('员工工号登录', style: TextStyle(fontSize: 12)),
+              selected: widget.config.loginMethod != 'account',
+              onSelected: (_) => widget.onChanged(
+                  widget.config.copyWith(loginMethod: 'job')),
+              visualDensity: VisualDensity.compact,
+            ),
+          ]),
+          const SizedBox(height: 10),
           _f('门店名称', _nameCtrl, '例如：总店', (v) => widget.onChanged(widget.config.copyWith(name: v))),
           const SizedBox(height: 8),
           _f('门店账号', _acctCtrl, '银豹门店账号', (v) => widget.onChanged(widget.config.copyWith(account: v))),
           const SizedBox(height: 8),
-          _f('员工工号', _jobCtrl, '例如：1001', (v) => widget.onChanged(widget.config.copyWith(cashierJobNumber: v)), keyboardType: TextInputType.number),
-          const SizedBox(height: 8),
-          _f('工号密码', _pwdCtrl, '工号登录密码', (v) => widget.onChanged(widget.config.copyWith(password: v)), obscureText: true),
+          if (widget.config.loginMethod != 'account') ...[
+            _f('员工工号', _jobCtrl, '例如：1001', (v) => widget.onChanged(widget.config.copyWith(cashierJobNumber: v)), keyboardType: TextInputType.number),
+            const SizedBox(height: 8),
+          ],
+          _f(widget.config.loginMethod == 'account' ? '登录密码' : '工号密码', _pwdCtrl,
+              widget.config.loginMethod == 'account'
+                  ? '账号登录密码'
+                  : '工号登录密码',
+              (v) => widget.onChanged(widget.config.copyWith(password: v)),
+              obscureText: true),
           const SizedBox(height: 6),
           Row(children: [
             Checkbox(

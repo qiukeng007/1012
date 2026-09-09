@@ -350,11 +350,14 @@ class _HomePageState extends State<HomePage>
       return;
     }
 
-    // Cookie 过期，自动重新登录（工号）；未配置工号密码则提示微信扫码登录
+    // Cookie 过期：工号登录走 HTTP 自动重登；账号密码登录无工号，提示到设置页手动重登
     _updateVerify(i, _VerifyState.expired, '登录已过期');
     await Future.delayed(const Duration(milliseconds: 300));
-    if (!config.isValid) {
-      _updateVerify(i, _VerifyState.failed, '请到设置页重新登录');
+    if (!config.isValid || config.loginMethod == 'account') {
+      _updateVerify(i, _VerifyState.failed,
+          config.loginMethod == 'account'
+              ? '账号密码登录已过期，请到设置页重新登录'
+              : '请到设置页重新登录');
       return;
     }
     _updateVerify(i, _VerifyState.loggingIn, '正在重新登录…');

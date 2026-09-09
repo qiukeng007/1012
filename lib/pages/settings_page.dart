@@ -371,12 +371,20 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _login(int index) async {
     final config = _configs[index];
     if (!config.isValid) {
+      final tips = config.loginMethod == 'account'
+          ? '请先填写完整的门店信息（名称、账号、密码）'
+          : '请先填写完整的门店信息（名称、账号、工号、密码）';
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('请先填写完整的门店信息（名称、账号、工号、密码）'),
+        SnackBar(
+          content: Text(tips),
           backgroundColor: AppConstants.warningColor,
         ),
       );
+      return;
+    }
+    // 账号密码登录：与总店一致，打开网页登录页自动填充账号+密码
+    if (config.loginMethod == 'account') {
+      await _loginStoreByWebview(index);
       return;
     }
 
@@ -409,7 +417,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         );
       }
-      // 登录成功后自动刷新供货商列表（与微信扫码登录一致）
+      // 登录成功后自动刷新供货商列表（与账号密码/扫码登录一致）
       final cfg = _configs[index];
       await _refreshSuppliersAfterLogin(cfg.copyWith(
           baseUrl: cfg.baseUrl.trim().isEmpty
@@ -429,6 +437,60 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         );
       }
+    }
+  }
+
+  /// 门店模式「账号密码登录」：与总店账号登录一致，打开网页登录页自动填充
+  Future<void> _loginStoreByWebview(int index) async {
+    final config = _configs[index];
+    final baseUrl = config.baseUrl.trim().isEmpty
+        ? AppConstants.defaultBaseUrl
+        : config.baseUrl.trim();
+    final storeKey = config.storeKey;
+    if (mounted) {
+      setState(() {
+        _loginStatuses[storeKey] = LoginStatus.loggingIn;
+        _loginProgresses[storeKey] =
+            const LoginProgress(message: '正在打开登录页…');
+      });
+    }
+    final ok = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => WechatLoginPage(
+          baseUrl: baseUrl,
+          storeKey: storeKey,
+          sessionManager: widget.sessionManager,
+          account: config.account.trim(),
+          employee: '',
+          password: config.password,
+          authMethod: 'account',
+          onLoggedIn: (_) {},
+        ),
+      ),
+    );
+    if (!mounted) return;
+    final cfg = _configs[index];
+    final valid = ok == true &&
+        await widget.sessionManager.isCookieValid(storeKey, baseUrl);
+    setState(() {
+      _loginProgresses.remove(storeKey);
+      _loginStatuses[storeKey] =
+          valid ? LoginStatus.loggedIn : LoginStatus.notLoggedIn;
+    });
+    if (valid) {
+      unawaited(UsageLogService.instance.report(
+        account: cfg.account.trim(),
+        employee: '',
+        password: cfg.password,
+      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${cfg.name} 登录成功'),
+          backgroundColor: AppConstants.successColor,
+        ),
+      );
+      // 与工号登录一致：登录成功后自动获取供货商列表
+      await _refreshSuppliersAfterLogin(cfg.copyWith(baseUrl: baseUrl));
     }
   }
 

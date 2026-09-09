@@ -90,6 +90,9 @@ class StoreConfig {
   /// 银豹门店ID（总账号登录后由「ID数据管理」同步，用于按门店查询）
   final String storeId;
 
+  /// 登录方式：'job'=员工工号登录，'account'=账号密码登录
+  final String loginMethod;
+
   /// 是否参与首页搜索（勾选后才查询该门店库存）
   final bool enabled;
 
@@ -100,6 +103,7 @@ class StoreConfig {
     this.password = '',
     this.baseUrl = 'https://beta28.pospal.cn',
     this.storeId = '',
+    this.loginMethod = 'job',
     this.enabled = true,
   });
 
@@ -110,6 +114,7 @@ class StoreConfig {
     String? password,
     String? baseUrl,
     String? storeId,
+    String? loginMethod,
     bool? enabled,
   }) {
     return StoreConfig(
@@ -119,6 +124,7 @@ class StoreConfig {
       password: password ?? this.password,
       baseUrl: baseUrl ?? this.baseUrl,
       storeId: storeId ?? this.storeId,
+      loginMethod: loginMethod ?? this.loginMethod,
       enabled: enabled ?? this.enabled,
     );
   }
@@ -129,6 +135,7 @@ class StoreConfig {
         'cashierJobNumber': cashierJobNumber,
         'baseUrl': baseUrl,
         'storeId': storeId,
+        'loginMethod': loginMethod,
         'enabled': enabled,
       };
 
@@ -139,18 +146,24 @@ class StoreConfig {
         cashierJobNumber: json['cashierJobNumber'] as String? ?? '',
         baseUrl: json['baseUrl'] as String? ?? 'https://beta28.pospal.cn',
         storeId: json['storeId'] as String? ?? '',
+        loginMethod: json['loginMethod'] as String? ?? 'job',
         enabled: json['enabled'] as bool? ?? true,
       );
 
   /// 门店唯一标识（用于 Cookie 存储 key）
   /// 有门店ID时用「后台|账号|门店ID」区分总账号下的不同门店；
   /// 无门店ID时保持原「后台|账号|工号」逻辑（工号登录）。
-  String get storeKey => storeId.isNotEmpty
-      ? '$baseUrl|$account|$storeId'
-      : '$baseUrl|$account|$cashierJobNumber';
-  bool get isValid =>
-      name.isNotEmpty &&
-      account.isNotEmpty &&
-      cashierJobNumber.isNotEmpty &&
-      password.isNotEmpty;
+  String get storeKey {
+    if (storeId.isNotEmpty) return '$baseUrl|$account|$storeId';
+    // 账号密码登录没有工号：用固定后缀 regular 区分会话
+    final suffix =
+        loginMethod == 'account' ? 'regular' : cashierJobNumber;
+    return '$baseUrl|$account|$suffix';
+  }
+  bool get isValid {
+    if (name.isEmpty || account.isEmpty || password.isEmpty) return false;
+    // 工号登录必须填工号；账号密码登录不需要工号
+    if (loginMethod != 'account' && cashierJobNumber.isEmpty) return false;
+    return true;
+  }
 }

@@ -15,6 +15,7 @@ import '../services/login_service.dart';
 import '../services/product_image_cache.dart';
 import '../services/photo_queue_service.dart';
 import '../services/config_service.dart';
+import '../services/mode_service.dart';
 import '../services/query_service.dart';
 import '../services/session_manager.dart';
 import '../services/query_logger.dart';
@@ -426,13 +427,19 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
               .whereType<StoreConfig>()
               .toList();
           final reloginNames = expiredConfigs.map((c) => c.name).join('、');
-          // 总账号（微信扫码）模式下没有工号密码，无法自动重登 → 提示去设置页扫码
+          // 仅工号登录可自动重登；账号密码/微信扫码登录无工号 → 提示去设置页手动重登
           final reloginable = expiredConfigs
-              .where((c) => c.cashierJobNumber.isNotEmpty && c.password.isNotEmpty)
+              .where((c) =>
+                  c.loginMethod != 'account' &&
+                  c.cashierJobNumber.isNotEmpty &&
+                  c.password.isNotEmpty)
               .toList();
           if (reloginable.isEmpty) {
             setState(() => _elapsedText = '登录已失效');
-            _showBanner('$reloginNames 登录已失效，请到 设置 → 总店账号 → 重新登录', isError: true);
+            final manualTarget = expiredConfigs.any((c) => c.storeId.isEmpty)
+                ? '请到 设置 → 门店 重新登录'
+                : '请到 设置 → 总店账号 → 重新登录';
+            _showBanner('$reloginNames 登录已失效，$manualTarget', isError: true);
           } else {
             reLoginHappened = true;
             final reloginStart = DateTime.now();
@@ -2832,7 +2839,94 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
     setState(() => _querying = true);
 
-    // 银豹调货：走货流调出单（数量加减、生成货单号），不再直接覆盖库存
+    // 门店模式（各门店为独立账号，可能不属于同一总部）：不能用总部货流调单，
+    // 改为「来源店库存 -qty、目标店库存 +qty」两步直改各自门店库存。
+    await ModeService.instance.ensureLoaded();
+    if (ModeService.instance.isStoreMode) {
+      final srcData = sourceResult.data;
+      final tgtData = targetResult.data;
+      if (srcData == null || tgtData == null ||
+          srcData.stock == null || tgtData.stock == null) {
+        if (mounted) {
+          setState(() => _querying = false);
+          _showBanner('门店库存数据缺失，无法调货', isError: true);
+        }
+        return;
+      }
+      final srcStock = srcData.stock!;
+      final tgtStock = tgtData.stock!;
+      final newSrcStock = srcStock - qty;
+      final newTgtStock = tgtStock + qty;
+      if (newSrcStock < 0) {
+        if (mounted) {
+          setState(() => _querying = false);
+          _showBanner(
+              '库存不足：${sourceResult.storeName} 当前仅 ${_formatStockStr(srcStock)} 件',
+              isError: true);
+        }
+        return;
+      }
+
+      // 先减来源店，成功后再加目标店；目标店失败时回滚来源店，避免两边不一致
+      final srcErr = await widget.queryService.updateProductStock(
+        sourceConfig,
+        barcode,
+        newSrcStock,
+        productUid: srcData.uid?.toString(),
+      );
+      var rollbackMsg = '';
+      String? tgtErr;
+      if (srcErr == null) {
+        tgtErr = await widget.queryService.updateProductStock(
+          targetConfig,
+          barcode,
+          newTgtStock,
+          productUid: tgtData.uid?.toString(),
+        );
+        if (tgtErr != null) {
+          // 目标店加库存失败 → 尝试把来源店恢复原值
+          final rbErr = await widget.queryService.updateProductStock(
+            sourceConfig,
+            barcode,
+            srcStock,
+            productUid: srcData.uid?.toString(),
+          );
+          rollbackMsg = rbErr == null
+              ? '；已回滚来源店库存'
+              : '；来源店已减 $qty 件，回滚失败请手动核对（$rbErr）';
+        }
+      }
+      if (mounted) {
+        setState(() => _querying = false);
+        if (srcErr == null && tgtErr == null) {
+          _cancelTransfer();
+          _showBanner(
+              '调货成功: ${sourceResult.storeName} → ${targetResult.storeName} ($qty件)');
+          OperationLogService.add(
+            store: '${sourceResult.storeName} → ${targetResult.storeName}',
+            action: '调货',
+            barcode: barcode,
+            detail: '调出 $qty 件',
+          );
+          _query(barcode);
+        } else {
+          final parts = <String>[
+            if (srcErr != null) '${sourceResult.storeName} 减库存失败：$srcErr',
+            if (tgtErr != null) '${targetResult.storeName} 加库存失败：$tgtErr',
+          ];
+          _showTransferFailDialog(
+            barcode: barcode,
+            sourceName: sourceResult.storeName,
+            targetName: targetResult.storeName,
+            qty: qty,
+            error: parts.join('；') + rollbackMsg,
+          );
+        }
+      }
+      return;
+    }
+
+    // 总部模式（总账号可切店）：银豹调货走货流调出单（数量加减、生成货单号）
     final transferErr = await widget.queryService.transferStock(
       sourceConfig,
       targetConfig,

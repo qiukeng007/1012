@@ -66,7 +66,9 @@ class _ModeSelectPageState extends State<ModeSelectPage> {
             const SizedBox(height: 4),
             Text(subtitle,
                 style: const TextStyle(
-                    fontSize: 12, color: AppConstants.textSecondary)),
+                    fontSize: 13,
+                    color: Color(0xFFE53935),
+                    fontWeight: FontWeight.w700)),
             const SizedBox(height: 8),
             for (final pt in points)
               Padding(
@@ -120,52 +122,28 @@ class _ModeSelectPageState extends State<ModeSelectPage> {
               child: Text(
                 firstRun
                     ? '请选择这台手机使用的登录方式（一部手机通常固定一种）。选定后不会再询问，需要更换时到「配置页底部 → 重置模式」。'
-                    : '更换模式不会删除两种模式各自保存的门店与登录配置，可随时再切回来。',
-                style: const TextStyle(
-                    fontSize: 13, color: AppConstants.textPrimary),
+                    : '不可随意切换模式，否则可能数据丢失',
+                style: TextStyle(
+                    fontSize: 13,
+                    color: firstRun
+                        ? AppConstants.textPrimary
+                        : const Color(0xFFE53935),
+                    fontWeight: firstRun ? FontWeight.normal : FontWeight.w700),
               ),
             ),
           ),
           const SizedBox(height: 12),
-          Container(
-            margin: const EdgeInsets.only(bottom: 12),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFEBEE),
-              borderRadius: BorderRadius.circular(AppConstants.radiusMd),
-              border: Border.all(color: const Color(0xFFE53935), width: 1.2),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Icon(Icons.warning_amber_rounded,
-                    size: 20, color: Color(0xFFE53935)),
-                const SizedBox(width: 8),
-                const Expanded(
-                  child: Text(
-                    '注意：总部模式适用于旗下有多家门店（大于 1 家）的情况；门店模式适用于单一门店使用。',
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: Color(0xFFE53935),
-                      fontWeight: FontWeight.w700,
-                      height: 1.4,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
           _optionCard(
             store: false,
             title: '总部模式',
-            subtitle: '用总账号登录，自动同步并勾选需要搜索的门店',
-            points: ['适合总部/管理员查看全部门店库存', '内部版本 1012-2'],
+            subtitle: '该模式需要使用总账号登录，且旗下门店大于一家',
+            points: ['修改数据可同步到所有门店', '内部版本 1012-2'],
           ),
           _optionCard(
             store: true,
             title: '门店模式',
-            subtitle: '逐店填写账号/工号/密码分别登录',
-            points: ['适合单个门店员工使用', '内部版本 1012-1'],
+            subtitle: '该模式支持账号密码登录与员工工号登录',
+            points: ['可添加不同门店', '内部版本 1012-1'],
           ),
           const SizedBox(height: 8),
           SizedBox(
