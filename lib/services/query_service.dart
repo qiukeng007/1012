@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -790,7 +791,7 @@ class QueryService {
       req.headers.set('Cookie', cookie);
       req.followRedirects = false;
       req.write(pageData);
-      final resp = await req.close().timeout(const Duration(seconds: 15));
+      final resp = await req.close().timeout(const Duration(seconds: 60));
       if (resp.statusCode != 200) {
         return StockHistoryResult(
             storeId: userId, storeName: store.name, error: 'HTTP ${resp.statusCode}');
@@ -889,8 +890,11 @@ class QueryService {
       return StockHistoryResult(
           storeId: userId, storeName: store.name, records: sortedRecords);
     } catch (e) {
+      final msg = e is TimeoutException
+          ? '查询超时：服务器响应较慢，请稍后重试或缩短查询时间范围'
+          : '查询异常：$e';
       return StockHistoryResult(
-          storeId: '', storeName: store.name, error: '查询异常：$e');
+          storeId: '', storeName: store.name, error: msg);
     }
   }
 

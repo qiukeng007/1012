@@ -9,6 +9,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # 中文本地化（日期选择器等系统组件显示中文）
+  flutter_localizations:
+    sdk: flutter
   # HTTP 客户端
   http: ^1.2.0
   # Cookie 管理
