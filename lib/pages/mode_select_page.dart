@@ -127,6 +127,34 @@ class _ModeSelectPageState extends State<ModeSelectPage> {
             ),
           ),
           const SizedBox(height: 12),
+          Container(
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFEBEE),
+              borderRadius: BorderRadius.circular(AppConstants.radiusMd),
+              border: Border.all(color: const Color(0xFFE53935), width: 1.2),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.warning_amber_rounded,
+                    size: 20, color: Color(0xFFE53935)),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    '注意：总部模式适用于旗下有多家门店（大于 1 家）的情况；门店模式适用于单一门店使用。',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Color(0xFFE53935),
+                      fontWeight: FontWeight.w700,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
           _optionCard(
             store: false,
             title: '总部模式',
