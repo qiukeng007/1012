@@ -3399,7 +3399,6 @@ class _CandidatePickerDialog extends StatelessWidget {
             // 多结果选择时展示价格，方便区分不同商品
             final priceParts = <String>[
               if (p.sellPrice != null) '售价 R${p.sellPrice!.toStringAsFixed(2)}',
-              if (p.buyPrice != null) '进价 R${p.buyPrice!.toStringAsFixed(2)}',
             ];
             final priceText = priceParts.isEmpty
                 ? ''
