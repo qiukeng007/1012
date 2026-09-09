@@ -3404,10 +3404,24 @@ class _CandidatePickerDialog extends StatelessWidget {
             final priceText = priceParts.isEmpty
                 ? ''
                 : '价格：${priceParts.join('    ')}';
+            final showThumb = _CandidatePickerDialog._hasImage(p);
             return ListTile(
               dense: true,
-              leading: const Icon(Icons.inventory_2_outlined,
-                  color: AppConstants.primaryColor),
+              leading: SizedBox(
+                width: 44,
+                height: 44,
+                child: showThumb
+                    ? _CachedImage(
+                        url: p.imageUrl!,
+                        width: 44,
+                        height: 44,
+                        decodeWidth: 88,
+                        decodeHeight: 88,
+                        radius: 6,
+                      )
+                    : const Icon(Icons.inventory_2_outlined,
+                        color: AppConstants.primaryColor, size: 32),
+              ),
               title: Text(
                 p.name,
                 maxLines: 2,
@@ -3450,6 +3464,12 @@ class _CandidatePickerDialog extends StatelessWidget {
         ),
       ],
     );
+  }
+
+  /// 是否有真实商品图片（默认占位图不算）
+  static bool _hasImage(ProductData p) {
+    final url = p.imageUrl ?? '';
+    return url.isNotEmpty && !url.contains('default_200x200');
   }
 
   static String _fmtStockNum(double v) {
