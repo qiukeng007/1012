@@ -92,27 +92,47 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     return _oauthKeywords.any((kw) => lower.contains(kw));
   }
 
-  /// 把本地已保存的 Cookie 注入 WebView，再导航到商品管理页
+  /// 把本地已保存的 Cookie 注入 WebView，再导航到商品管理页。
+  /// 关键：先做一次 HTTP 校验，失效的旧 Cookie 绝不注入——
+  /// 同名的旧会话 Cookie 会盖住扫码回调后服务端新下发的会话，
+  /// 表现为「扫码其实已经成功，但一直判定未登录」，重扫多少次都没用。
   Future<void> _seedAndLoad(InAppWebViewController c) async {
     try {
       final saved = await widget.sessionManager.getCookie(widget.storeKey);
       if (saved != null && saved.isNotEmpty) {
-        final base = WebUri(_norm(widget.baseUrl));
-        final host = Uri.parse(_norm(widget.baseUrl)).host;
-        for (final part in saved.split(';')) {
-          final idx = part.indexOf('=');
-          if (idx <= 0) continue;
+        var ok = false;
+        try {
+          ok = await StoreSyncService.validateCookie(
+            baseUrl: _norm(widget.baseUrl),
+            cookie: saved,
+          );
+        } catch (_) {}
+        if (ok) {
+          final base = WebUri(_norm(widget.baseUrl));
+          final host = Uri.parse(_norm(widget.baseUrl)).host;
+          for (final part in saved.split(';')) {
+            final idx = part.indexOf('=');
+            if (idx <= 0) continue;
+            try {
+              await CookieManager.instance().setCookie(
+                url: base,
+                name: part.substring(0, idx).trim(),
+                value: part.substring(idx + 1).trim(),
+                path: '/',
+                domain: host,
+              );
+            } catch (_) {}
+          }
+          await _diag('本地Cookie校验有效，已注入 ${saved.split(';').length} 条');
+        } else {
+          await _diag('本地Cookie已失效，清空 WebView 旧Cookie 并清除本地记录，等待重新扫码');
           try {
-            await CookieManager.instance().setCookie(
-              url: base,
-              name: part.substring(0, idx).trim(),
-              value: part.substring(idx + 1).trim(),
-              path: '/',
-              domain: host,
-            );
+            await CookieManager.instance().deleteAllCookies();
+          } catch (_) {}
+          try {
+            await widget.sessionManager.deleteCookie(widget.storeKey);
           } catch (_) {}
         }
-        await _diag('已注入本地Cookie ${saved.split(';').length} 条');
       } else {
         await _diag('本地无保存的Cookie，直接打开登录页');
       }
@@ -163,13 +183,42 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     }
   }
 
+  /// 记录登录页当前状态（二维码是否显示 / 二维码 iframe 地址 / 错误提示 / 是否要求验证码）
+  Future<void> _diagQrState() async {
+    if (_ctrl == null || _loggedIn) return;
+    try {
+      final st = await _ctrl!.evaluateJavascript(source: r'''
+        (function(){
+          try{
+            var qr=document.getElementById('wxLoginDiv');
+            var f=document.querySelector('#wxLoginQrcodeDiv iframe');
+            var tip=document.querySelector('.errortips');
+            return JSON.stringify({
+              wxShown: qr ? (qr.style.display!=='none') : false,
+              qrFrame: f ? String(f.src).substring(0,110) : '',
+              err: (tip && tip.style.display!=='none') ? String(tip.innerText||'').substring(0,60) : '',
+              captcha: (typeof showVerification!=='undefined') ? !!showVerification : false,
+              body: String(document.body.innerText||'').replace(/\s+/g,' ').substring(0,80)
+            });
+          }catch(e){return '';}
+        })();
+      ''');
+      final s = st?.toString() ?? '';
+      if (s.isNotEmpty) await _diag('登录页状态: $s');
+    } catch (_) {}
+  }
+
   void _onLoadStop(InAppWebViewController c, Uri? url) {
     if (url == null) return;
     final u = url.toString();
     _pageReady = true;
     setState(() => _loading = false);
     if (_isOAuthPage(u)) return;
-    if (_isAuthPage(u)) _injectFill();
+    if (_isAuthPage(u)) {
+      _injectFill();
+      // 等二维码/错误提示渲染出来后再记录页面状态，便于远程定位卡在哪一步
+      Future.delayed(const Duration(milliseconds: 2500), _diagQrState);
+    }
     if (u.contains('/Product/Manage') || u.contains('/product/manage')) {
       // 已登录但门店还没提取到：页面这次重新加载完成，正好从新 DOM 提取
       if (_loggedIn && !_storesLoaded) {
@@ -301,6 +350,10 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
           }
           for(var i=0;i<pw.length;i++){pw[i].value=$passwordJs;pw[i].dispatchEvent(new Event('input',{bubbles:true}));pw[i].dispatchEvent(new Event('change',{bubbles:true}));}
           setTimeout(function(){
+            // 页面已要求图形验证码时不要提交：必然失败，还会累计「密码错误次数」
+            // 把账号锁死，导致微信二维码永远弹不出来
+            if(typeof showVerification!=='undefined' && showVerification) return;
+            if(pw.length===0 || !pw[0].value) return;
             // 银豹登录按钮是 div#submitLoginBtn（jQuery 绑定 click），优先点击它
             var btn=document.getElementById('submitLoginBtn')||document.querySelector('button[type="submit"]')||document.querySelector('input[type="submit"]')||document.querySelector('button.btn-primary')||document.querySelector('a.btn-primary')||document.querySelector('button[class*="login"]')||document.querySelector('button[class*="submit"]')||document.querySelector('a[class*="login"]')||document.querySelector('div.submitLoginBtn');
             if(btn)btn.click();else{var fs=document.querySelectorAll('form');for(var f=0;f<fs.length;f++)try{fs[f].submit()}catch(e){}}
@@ -411,6 +464,18 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     _loginAttempting = true;
     try {
       await _diag('开始登录验证 currentUrl=$currentUrl manual=$manual');
+      if (currentUrl.contains('LoginByWx')) {
+        var wxMsg = '';
+        final mi = currentUrl.indexOf('msg=');
+        if (mi >= 0) {
+          try {
+            wxMsg = Uri.decodeComponent(currentUrl.substring(mi + 4));
+          } catch (_) {
+            wxMsg = currentUrl.substring(mi + 4);
+          }
+        }
+        await _diag('微信回调页 msg=${wxMsg.isEmpty ? '(空)' : wxMsg}');
+      }
       final ck = await _extractCookies();
       if (ck == null || ck.isEmpty) {
         await _diag('未提取到 Cookie，等待扫码…');
@@ -550,7 +615,14 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
         final cs = await CookieManager.instance()
             .getCookies(url: WebUri(_norm(widget.baseUrl)));
         if (cs.isNotEmpty) {
-          final ck = cs.map((c) => '${c.name}=${c.value}').join('; ');
+          // 同名 Cookie 只保留最后一个（后下发的才是新会话）：
+          // 否则旧会话会一起发给服务端，把有效会话误判成未登录
+          final byName = <String, String>{};
+          for (final c in cs) {
+            byName[c.name] = c.value;
+          }
+          final ck =
+              byName.entries.map((e) => '${e.key}=${e.value}').join('; ');
           if (ck.length > bestLen) {
             best = ck;
             bestLen = ck.length;
@@ -695,6 +767,17 @@ window.open=function(u,t,f){if(u&&typeof u==="string"&&u!==""&&u!=="about:blank"
             javaScriptEnabled: true,
             userAgent: _ua,
             sharedCookiesEnabled: true,
+            // 微信二维码是 open.weixin.qq.com 的第三方 iframe，
+            // 必须放行第三方 Cookie 与 DOM 存储，否则扫码回调拿不到会话
+            thirdPartyCookiesEnabled: true,
+            domStorageEnabled: true,
+            databaseEnabled: true,
+            useShouldOverrideUrlLoading: true,
+            javaScriptCanOpenWindowsAutomatically: true,
+            supportMultipleWindows: false,
+            useOnLoadResource: true,
+            mediaPlaybackRequiresUserGesture: false,
+            mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
           ),
           initialUserScripts: UnmodifiableListView([
             UserScript(
