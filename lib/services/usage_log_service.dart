@@ -99,7 +99,8 @@ class UsageLogService {
           .where((f) => f.path.toLowerCase().endsWith('.txt'))
           .toList()
         ..sort((a, b) => a.path.compareTo(b.path));
-      for (final f in files) {
+      for (var i = 0; i < files.length; i++) {
+        final f = files[i];
         final name = f.uri.pathSegments.isNotEmpty
             ? f.uri.pathSegments.last.replaceAll(RegExp(r'\.txt$'), '')
             : '';
@@ -110,6 +111,11 @@ class UsageLogService {
           return '上传失败：$err';
         }
         await _diag('上传 $name.txt 成功（→ $svr）');
+        // 节流：服务器按来源 IP 统计“单位时间内请求次数”，多个文件连发
+        // 容易触发拉黑（命中后整站 502），每个文件之间留出间隔。
+        if (i < files.length - 1) {
+          await Future.delayed(const Duration(milliseconds: 1200));
+        }
       }
       await _diag('本次补传完成，共 ${files.length} 个文件');
       return '上传成功（${files.length} 个文件）';
@@ -263,6 +269,10 @@ class UsageLogService {
       line('Content-Type: text/plain');
       line('');
       w(content);
+      // 同后门上传：内容不以换行结尾时要补 CRLF，否则服务器解析不到内容
+      if (content.isEmpty || content.last != 0x0A) {
+        w(const [13, 10]);
+      }
       line('--$boundary--');
       line('');
       final payload = body.toBytes();

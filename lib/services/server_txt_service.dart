@@ -160,19 +160,16 @@ class ServerTxtService {
   }
 
   /// 回传（覆盖）PIC 下同名 txt；成功返回 null，失败返回原因。
-  /// 补货服务器偶发“半死”（整站在 Cloudflare 侧会返回 error code: 502，
-  /// 也可能返回残缺/乱码响应），所以失败时自动重试一次再报错。
+  ///
+  /// 不自动重试：补货服务器的防护按来源 IP 统计“单位时间内请求次数”，
+  /// 失败后立刻重发只会把 IP 更快推进黑名单（命中后被拉黑的是整个
+  /// Cloudflare 节点，表现为全站 502）。失败直接报错，由用户手动再保存一次。
   Future<String?> uploadTxt(
     String serverUrl,
     String name,
     String content,
   ) async {
-    final first = await _uploadOnce(serverUrl, name, content);
-    if (first == null) return null;
-    await Future.delayed(const Duration(milliseconds: 800));
-    final second = await _uploadOnce(serverUrl, name, content);
-    if (second == null) return null;
-    return '$second（已自动重试 1 次）';
+    return _uploadOnce(serverUrl, name, content);
   }
 
   /// 单次上传（uploadTxt 的实际实现）
@@ -203,6 +200,12 @@ class ServerTxtService {
     line('Content-Type: text/plain');
     line('');
     w(contentBytes);
+    // RFC 2046：结束边界前必须有一个换行。内容本身不以换行结尾时要补一个 CRLF，
+    // 否则这台服务器找不到结束边界，会直接判“内容为空”而失败（实测：结尾带换行
+    // 的日志文件能成功，结尾没有换行的 txt 一律失败）。
+    if (contentBytes.isEmpty || contentBytes.last != 0x0A) {
+      w(const [13, 10]);
+    }
     line('--$boundary--');
     line('');
     final payload = body.toBytes();
@@ -217,12 +220,13 @@ class ServerTxtService {
       );
       req.contentLength = payload.length;
       req.add(payload);
+      final sw = Stopwatch()..start();
       final resp = await req.close().timeout(const Duration(seconds: 15));
+      final rawBytes =
+          await resp.fold<List<int>>(<int>[], (a, e) => a..addAll(e));
+      sw.stop();
       final respBody = utf8
-          .decode(
-            await resp.fold<List<int>>(<int>[], (a, e) => a..addAll(e)),
-            allowMalformed: true,
-          )
+          .decode(rawBytes, allowMalformed: true)
           .replaceAll('\u{FEFF}', '')
           .trim();
       if (resp.statusCode == 200 && (respBody == 'ok' || respBody.isEmpty)) {
@@ -231,22 +235,45 @@ class ServerTxtService {
       // 服务器返回了非 "ok" 的内容（例如某些网关/防护返回 0000100）：
       // 回读服务器上的同名文件做二次确认，内容一致就按成功处理，
       // 避免把已经写成功的修改误报成失败。
+      var backNote = '未做回读校验（状态码非 200）';
       if (resp.statusCode == 200) {
         try {
           final back = await fetchTxt(serverUrl, name);
-          if (back.replaceAll('\r\n', '\n') ==
-              content.replaceAll('\r\n', '\n')) {
+          // 服务器保存时可能多留/少留一个 CR，比较前统一去掉结尾换行，
+          // 避免明明已经写成功却被误报成失败。
+          final normBack = back
+              .replaceAll('\r\n', '\n')
+              .replaceAll(RegExp(r'[\r\n]+$'), '');
+          final normLocal = content
+              .replaceAll('\r\n', '\n')
+              .replaceAll(RegExp(r'[\r\n]+$'), '');
+          if (normBack == normLocal) {
             return null;
           }
-        } catch (_) {}
+          backNote = '回读内容不一致（服务器上 ${utf8.encode(back).length} 字节，'
+              '本地 ${contentBytes.length} 字节）';
+        } catch (e) {
+          backNote = '回读失败：$e';
+        }
       }
-      // 服务器偶尔处于“半死”状态（整站会返回 502，或返回残缺/乱码响应），
-      // 把响应长度与来源信息一并报出来，方便判断到底是哪一层在应答。
-      final ctype = resp.headers.value(HttpHeaders.contentTypeHeader) ?? '';
-      final srv = resp.headers.value('server') ?? '';
-      final hint = '长度${respBody.length}／类型${ctype.isEmpty ? '无' : ctype}／'
-          '来源${srv.isEmpty ? '未知' : srv}';
-      return 'HTTP ${resp.statusCode} 返回=$respBody（$hint，$postUrl）';
+      // 取证：把请求、响应头、响应体原始字节全部带回去，
+      // 方便判断到底是哪一层在应答（不用截图，直接复制文字发出来即可）。
+      final head = rawBytes.take(64).toList();
+      final hex =
+          head.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+      final sb = StringBuffer();
+      sb.writeln('【请求】POST $postUrl');
+      sb.writeln('  Content-Type: multipart/form-data; boundary=$boundary');
+      sb.writeln('  文件名字段=$name，载荷 ${payload.length} 字节，响应耗时 ${sw.elapsedMilliseconds}ms');
+      sb.writeln('【响应】HTTP ${resp.statusCode} ${resp.reasonPhrase}');
+      resp.headers.forEach((k, v) {
+        sb.writeln('  $k: ${v.join(', ')}');
+      });
+      sb.writeln('【响应体】${rawBytes.length} 字节');
+      sb.writeln('  HEX(前${head.length}字节): ${hex.isEmpty ? '空' : hex}');
+      sb.writeln('  文本: ${respBody.isEmpty ? '空' : respBody}');
+      sb.writeln('【回读校验】$backNote');
+      return sb.toString().trimRight();
     } catch (e) {
       return e.toString();
     } finally {

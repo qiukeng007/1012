@@ -22,8 +22,14 @@ class ConfigService {
   static const _restockConfigKeyHq = 'restock_config_hq';
   static const _restockConfigKeyStore = 'restock_config_store';
   static const _restockConfigKeyLegacy = 'restock_config';
-  static const _serverUrlKey = 'restock_server_url'; // 两模式通用
-  static const _operatorNameKey = 'restock_operator_name'; // 两模式通用
+  /// 旧版把补货服务器地址与操作员名做成「两模式共用」；现已改为每个登录模式
+  /// 各存一套（地址/供货商/操作员互不影响）。这两个 key 只作为升级时
+  /// 的首次播种来源，不再写入。
+  static const _serverUrlKeyLegacy = 'restock_server_url';
+  static const _operatorNameKeyLegacy = 'restock_operator_name';
+  /// 某个模式是否已从旧版共用值播种过（播种后该模式独立保存，互不覆盖）
+  static const _seedKeyHq = 'restock_mode_seeded_hq';
+  static const _seedKeyStore = 'restock_mode_seeded_store';
 
   final FlutterSecureStorage _secureStorage;
 
@@ -175,58 +181,53 @@ class ConfigService {
     return prefs.getString(_baseUrlKey) ?? 'https://beta28.pospal.cn';
   }
 
-  /// 保存补货配置：补货服务器地址/操作员为两模式通用（写共享 key），其余按当前模式写入
+  /// 保存补货配置：服务器地址/供货商/操作员全部按当前登录模式独立保存，
+  /// 门店模式与总部模式各一套，切换模式时互不覆盖
   Future<void> saveRestockConfig(RestockConfig config) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_serverUrlKey, config.serverUrl);
-    await prefs.setString(_operatorNameKey, config.operatorName);
     await writeRestockJson(jsonEncode(config.toJson()));
   }
 
-  /// 加载补货配置（供货商列表由银豹登录后自动获取）；
-  /// 命中旧版共享 key 时一次性迁移到当前模式 key
+  /// 加载补货配置（供货商列表由银豹登录后自动获取）。
+  /// 按当前登录模式读取各自那一套：地址/供货商/操作员两模式互不影响。
+  /// 升级后第一次读某个模式时，用旧版共用值播种一次并落盘，
+  /// 保证「切换模式时原来的记录还在」，之后两个模式各改各的。
   Future<RestockConfig> loadRestockConfig() async {
     final prefs = await SharedPreferences.getInstance();
     await ModeService.instance.ensureLoaded();
     final storeMode = ModeService.instance.isStoreMode;
-    final modeKey =
-        storeMode ? _restockConfigKeyStore : _restockConfigKeyHq;
+    final modeKey = storeMode ? _restockConfigKeyStore : _restockConfigKeyHq;
+    final seedKey = storeMode ? _seedKeyStore : _seedKeyHq;
+
     var jsonStr = prefs.getString(modeKey);
     if (jsonStr == null || jsonStr.isEmpty) {
+      // 旧版无后缀 key 只当播种来源，保留着给另一个模式首次读取时用
       jsonStr = prefs.getString(_restockConfigKeyLegacy);
-      if (jsonStr != null && jsonStr.isNotEmpty) {
-        await prefs.setString(modeKey, jsonStr);
-        await prefs.remove(_restockConfigKeyLegacy);
+    }
+    final legacyUrl = (prefs.getString(_serverUrlKeyLegacy) ?? '').trim();
+    final legacyOp = (prefs.getString(_operatorNameKeyLegacy) ?? '').trim();
+    final seeded = prefs.getBool(seedKey) ?? false;
+
+    var config = RestockConfig(serverUrl: legacyUrl, operatorName: legacyOp);
+    if (jsonStr != null && jsonStr.isNotEmpty) {
+      try {
+        config = RestockConfig.fromJson(
+          jsonDecode(jsonStr) as Map<String, dynamic>,
+        );
+      } catch (_) {
+        // 旧数据损坏：退回旧版共用值，不让配置页拿不到东西
       }
     }
-    // 服务器地址/操作员：两模式通用（切换模式后仍保留共享值）
-    var sharedUrl = prefs.getString(_serverUrlKey) ?? '';
-    var sharedOp = prefs.getString(_operatorNameKey) ?? '';
-    if (jsonStr == null || jsonStr.isEmpty) {
-      // 当前模式还没有补货配置：用共享值抵底，避免切换模式后地址/操作员丢失
-      return RestockConfig(
-        serverUrl: sharedUrl,
-        operatorName: sharedOp,
-      );
-    }
-    try {
-      final json = jsonDecode(jsonStr) as Map<String, dynamic>;
-      var config = RestockConfig.fromJson(json);
-      // 无共享值时用当前模式旧值并迁移到共享
-      if (sharedUrl.isEmpty && config.serverUrl.isNotEmpty) {
-        sharedUrl = config.serverUrl;
-        await prefs.setString(_serverUrlKey, sharedUrl);
+    if (!seeded) {
+      // 两个模式都先继承原来共用的地址/操作员（否则切换模式后会看到
+      // 1011 时代留在模式 JSON 里的旧地址），播种后各自独立
+      if (legacyUrl.isNotEmpty) config = config.copyWith(serverUrl: legacyUrl);
+      if (legacyOp.isNotEmpty) {
+        config = config.copyWith(operatorName: legacyOp);
       }
-      if (sharedOp.isEmpty && config.operatorName.isNotEmpty) {
-        sharedOp = config.operatorName;
-        await prefs.setString(_operatorNameKey, sharedOp);
-      }
-      if (sharedUrl.isNotEmpty) config = config.copyWith(serverUrl: sharedUrl);
-      if (sharedOp.isNotEmpty) config = config.copyWith(operatorName: sharedOp);
-      return config;
-    } catch (_) {
-      return RestockConfig(serverUrl: sharedUrl, operatorName: sharedOp);
+      await prefs.setBool(seedKey, true);
+      await prefs.setString(modeKey, jsonEncode(config.toJson()));
     }
+    return config;
   }
 
   static const _printerConfigKey = 'printer_configs';

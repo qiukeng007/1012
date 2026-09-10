@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/store_config.dart';
 import '../services/mode_service.dart';
@@ -149,6 +150,8 @@ class _ServerTxtManagerPageState extends State<ServerTxtManagerPage> {
         status = '已从服务器获取 ${entries.length} 个 txt 文件';
       } else {
         // 2) 备选：目录索引页（EnDir 开启的服务器可用）
+        // 兜底前先缓一下：服务器若正在防护/半死，紧接着再发请求会加重被拉黑的风险
+        await Future.delayed(const Duration(milliseconds: 600));
         final html = await ServerTxtService.instance.fetchPicIndex(_url);
         final indexed = ServerTxtService.parseIndex(html);
         final hasAnchors =
@@ -213,7 +216,8 @@ class _ServerTxtManagerPageState extends State<ServerTxtManagerPage> {
     setState(() => _downloadingAll = true);
     var okCount = 0;
     final failNames = <String>[];
-    for (final e in _entries) {
+    for (var i = 0; i < _entries.length; i++) {
+      final e = _entries[i];
       try {
         final text = await ServerTxtService.instance.fetchTxt(_url, e.name);
         await ServerTxtService.instance.cacheTxt(e.name, text);
@@ -222,6 +226,10 @@ class _ServerTxtManagerPageState extends State<ServerTxtManagerPage> {
         failNames.add('${e.name}（$err）');
       }
       if (!mounted) return;
+      // 节流：文件之间留间隔，避免短时间内连发请求被服务器防护拉黑
+      if (i < _entries.length - 1) {
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
     }
     if (!mounted) return;
     setState(() {
@@ -595,11 +603,44 @@ class _ServerTxtEditPageState extends State<ServerTxtEditPage> {
       Navigator.of(context).pop(true);
     } else {
       setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('上传失败：$err'),
-        duration: const Duration(seconds: 4),
-      ));
+      _showSaveErrorDialog(err);
     }
+  }
+
+  /// 上传失败的取证弹窗：报错较长，用可选中文本 + 复制按钮，
+  /// 直接复制文字发出来就能定位是哪一层在应答（不用截图）。
+  void _showSaveErrorDialog(String detail) {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('上传失败'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 360),
+          child: SingleChildScrollView(
+            child: SelectableText(detail, style: const TextStyle(fontSize: 12)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: detail));
+              ScaffoldMessenger.of(ctx).showSnackBar(
+                const SnackBar(
+                  content: Text('已复制到剪贴板'),
+                  duration: Duration(seconds: 2),
+                ),
+              );
+            },
+            child: const Text('复制'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -628,8 +669,9 @@ class _ServerTxtEditPageState extends State<ServerTxtEditPage> {
                         maxLines: null,
                         expands: true,
                         textAlignVertical: TextAlignVertical.top,
-                        autocorrect: false,
-                        enableSuggestions: false,
+                        // 用通用文本键盘：之前禁用联想/自动更正会被安卓输入法
+                        // 当成密码框，弹出没有候选栏的安全键盘。
+                        keyboardType: TextInputType.multiline,
                         style: const TextStyle(
                           fontSize: 13,
                           height: 1.4,

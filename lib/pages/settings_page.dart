@@ -168,6 +168,8 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _maybeAutoSyncSuppliers() async {
     if (_autoSupplierSyncing) return;
     if (ModeService.instance.isHqMode) return;
+    // 记录抓取开始时的登录模式：中途切换模式就放弃写入，避免串到另一种配置
+    final startedStoreMode = ModeService.instance.isStoreMode;
     if (_restockConfig.suppliers.trim().isNotEmpty) return;
     if (_restockConfig.suppliersReadonly) return;
     StoreConfig? loggedIn;
@@ -193,6 +195,7 @@ class _SettingsPageState extends State<SettingsPage> {
               : loggedIn.baseUrl.trim(),
         ),
       );
+      if (ModeService.instance.isStoreMode != startedStoreMode) return;
       if (mounted && result.suppliers.isNotEmpty) {
         final updated = _restockConfig.copyWith(
           suppliers: result.suppliers.join(','),
@@ -957,7 +960,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   /// 照片队列日志：按 条码/商品/门店/状态 过滤；
-  /// 未输入关键词时默认显示最近 40 条，可一键显示全部。
+  /// 未输入关键词时默认显示最近 10 条（其余收起），可一键展开全部。
   List<Widget> _buildPhotoJobRows() {
     List<PhotoJob> jobs;
     if (_photoFilter.isNotEmpty) {
@@ -968,7 +971,7 @@ class _SettingsPageState extends State<SettingsPage> {
     }
     final widgets = <Widget>[];
     final visible =
-        (_photoFilter.isEmpty && !_photoShowAll) ? jobs.take(40).toList() : jobs;
+        (_photoFilter.isEmpty && !_photoShowAll) ? jobs.take(10).toList() : jobs;
     if (visible.isEmpty) {
       widgets.add(const Padding(
         padding: EdgeInsets.symmetric(vertical: 8),
@@ -984,7 +987,7 @@ class _SettingsPageState extends State<SettingsPage> {
           onPressed: () => setState(() => _photoShowAll = true),
           child: Text('显示全部 ${jobs.length} 条'),
         ));
-      } else if (_photoShowAll && jobs.length > 40) {
+      } else if (_photoShowAll && jobs.length > 10) {
         widgets.add(TextButton(
           onPressed: () => setState(() => _photoShowAll = false),
           child: const Text('收起'),
@@ -1370,20 +1373,26 @@ class _SettingsPageState extends State<SettingsPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Row(
+            Row(
               children: [
-                Icon(Icons.add_business,
+                const Icon(Icons.add_business,
                     size: 16, color: AppConstants.primaryColor),
-                SizedBox(width: 6),
+                const SizedBox(width: 6),
                 Text(
-                  '补货配置',
-                  style: TextStyle(
+                  _storeMode ? '补货配置（门店模式）' : '补货配置（总部模式）',
+                  style: const TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
                     color: AppConstants.primaryColor,
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '服务器地址、供货商列表按当前登录模式单独保存；切换模式后用的是另一套，互不影响。',
+              style: TextStyle(
+                  fontSize: 11, color: AppConstants.textSecondary),
             ),
             const SizedBox(height: 10),
             _buildRestockField(
@@ -1569,6 +1578,11 @@ class _SettingsPageState extends State<SettingsPage> {
   /// 进入模式选择页重新选择登录模式；确认后按新模式重载配置
   Future<void> _resetMode() async {
     if (ModeService.instance.prompting) return;
+    // 切换前先把当前模式还没落盘的改动存好，避免它被写进另一种模式的配置
+    _autoSaveTimer?.cancel();
+    _autoSaveTimer = null;
+    await widget.configService.saveRestockConfig(_restockConfig);
+    if (!mounted) return;
     ModeService.instance.prompting = true;
     final bool? changed;
     try {

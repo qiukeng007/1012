@@ -700,6 +700,8 @@ class _HomePageState extends State<HomePage>
       final hasSuppliers = (_restockService?.suppliers.isNotEmpty ?? false);
       if (!manualMode && hasSuppliers) return;
       var listUpdated = false;
+      // 记录抓取开始时的登录模式：中途切换模式就放弃写入，避免串到另一种配置
+      final startedStoreMode = ModeService.instance.isStoreMode;
       for (final store in _configs) {
         if (!store.enabled) continue;
         if (!await _sessionManager.isCookieValid(
@@ -713,6 +715,11 @@ class _HomePageState extends State<HomePage>
         // 静默获取供货商列表（全局配置，任一门店成功即可）
         final result = await _loginService.fetchSuppliers(store);
         if (result.suppliers.isEmpty) continue;
+        if (ModeService.instance.isStoreMode != startedStoreMode) {
+          // 模式已切换：这次结果属于另一种模式的配置，丢弃并允许在新模式下重抓
+          _silentSupplierFetched = false;
+          return;
+        }
         final current = await _configService.loadRestockConfig();
         final updated = current.copyWith(
           suppliers: result.suppliers.join(','),
