@@ -21,6 +21,7 @@ import '../services/mode_service.dart';
 import '../widgets/config_form.dart';
 import '../widgets/login_button.dart';
 import 'mode_select_page.dart';
+import 'server_txt_manager_page.dart';
 import 'wechat_login_page.dart';
 import '../services/store_sync_service.dart';
 import '../models/printer_config.dart';
@@ -60,6 +61,8 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _updatingSuppliers = false;
   bool _autoSupplierSyncing = false;
   String _appVersion = '';
+  int _versionTapCount = 0;
+  Timer? _versionTapTimer;
   String _serverStatus = '';
   Timer? _autoSaveTimer;
   Timer? _serverCheckTimer;
@@ -216,8 +219,17 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final loaded = await widget.configService.loadConfigs();
       // 清理历史遗留的重复门店配置
-      final configs = _dedupeConfigs(loaded);
-      if (configs.length != loaded.length) {
+      var configs = _dedupeConfigs(loaded);
+      // 修复历史遗留：后台地址被旧逻辑降级成 http://（会导致微信扫码登录失败），统一改回 https
+      var baseUrlChanged = false;
+      final fixedConfigs = <StoreConfig>[];
+      for (final c in configs) {
+        final nb = AppConstants.normalizePospalUrl(c.baseUrl);
+        if (nb != c.baseUrl) baseUrlChanged = true;
+        fixedConfigs.add(nb == c.baseUrl ? c : c.copyWith(baseUrl: nb));
+      }
+      configs = fixedConfigs;
+      if (configs.length != loaded.length || baseUrlChanged) {
         await widget.configService.saveConfigs(configs);
       }
       final restockConfig = await widget.configService.loadRestockConfig();
@@ -234,8 +246,12 @@ class _SettingsPageState extends State<SettingsPage> {
         _appVersion = info.version;
         _loading = false;
       });
-      // 同步控制器
-      final baseUrl = await widget.configService.getBaseUrl();
+      // 同步控制器（并修复历史遗留：全局后台地址被旧逻辑降级成 http://）
+      final savedBaseUrl = await widget.configService.getBaseUrl();
+      final baseUrl = AppConstants.normalizePospalUrl(savedBaseUrl);
+      if (baseUrl != savedBaseUrl) {
+        await widget.configService.saveBaseUrl(baseUrl);
+      }
       _masterBaseUrlCtrl.text = baseUrl;
       _baseUrlCtrl.text = baseUrl;
       final mprefs = await SharedPreferences.getInstance();
@@ -619,14 +635,10 @@ class _SettingsPageState extends State<SettingsPage> {
     return '${n.year}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')} ${n.hour.toString().padLeft(2, '0')}:${n.minute.toString().padLeft(2, '0')}';
   }
 
-  String _normMasterUrl(String url) {
-    var u = url.trim();
-    if (u.isEmpty) return AppConstants.defaultBaseUrl;
-    if (u.startsWith('http://') || u.startsWith('https://')) {
-      return u.replaceAll(RegExp(r'/+$'), '');
-    }
-    return 'https://$u';
-  }
+  /// 银豹后台地址：域名一律用 https（微信扫码登录的 OAuth 回调必须 https，
+  /// 用 http 打开银豹登录页会导致扫码直接失败）。
+  /// 不要用 AuthService.normalizeUrl()——那是补货服务器（局域网）用的，会把 https 降级成 http。
+  String _normMasterUrl(String url) => AppConstants.normalizePospalUrl(url);
 
   /// 用总账号会话从银豹同步门店列表到门店配置（ID数据管理）
   Future<void> _syncStoresFromMaster() async {
@@ -2024,8 +2036,9 @@ class _SettingsPageState extends State<SettingsPage> {
     await prefs.setString('login_password', _masterPasswordCtrl.text);
     await prefs.setString('login_method', _masterLoginMethod);
     await prefs.setString('login_base_url', _masterBaseUrlCtrl.text.trim());
-    final norm = AuthService.normalizeUrl(_masterBaseUrlCtrl.text.trim());
-    await prefs.setString('server_url', norm);
+    // 银豹后台地址必须保持 https：微信扫码登录的 OAuth 回调要求 https，
+    // 用 AuthService.normalizeUrl() 会把 https 降级成 http，导致扫码登录失败
+    final norm = AppConstants.normalizePospalUrl(_masterBaseUrlCtrl.text);
     await widget.configService.saveBaseUrl(norm);
   }
 
@@ -2697,10 +2710,71 @@ class _SettingsPageState extends State<SettingsPage> {
     return Center(
       child: Padding(
         padding: const EdgeInsets.only(top: 8, bottom: 24),
-        child: Text(
-          '当前版本: $_appVersion',
-          style:
-              const TextStyle(fontSize: 12, color: AppConstants.textSecondary),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _onVersionTap,
+          child: Text(
+            '当前版本: $_appVersion',
+            style: const TextStyle(
+                fontSize: 12, color: AppConstants.textSecondary),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 连续点击版本号 10 次触发管理员后门
+  void _onVersionTap() {
+    _versionTapTimer?.cancel();
+    _versionTapCount++;
+    if (_versionTapCount >= 10) {
+      _versionTapCount = 0;
+      _askAdminPassword();
+      return;
+    }
+    _versionTapTimer = Timer(const Duration(milliseconds: 800), () {
+      _versionTapCount = 0;
+    });
+  }
+
+  Future<void> _askAdminPassword() async {
+    final ctrl = TextEditingController();
+    final input = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('管理员验证'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          obscureText: true,
+          decoration: const InputDecoration(hintText: '请输入管理员密码'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (input == null) return;
+    if (input.trim() != '99252057') {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('密码错误'), duration: Duration(seconds: 2)),
+      );
+      return;
+    }
+    if (!mounted) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => ServerTxtManagerPage(
+          initialServerUrl: _restockConfig.serverUrl,
         ),
       ),
     );

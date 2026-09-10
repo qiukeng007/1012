@@ -79,8 +79,9 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
       'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
 
-  static String _norm(String url) =>
-      url.trim().replaceAll(RegExp(r'/+$'), '');
+  /// 银豹后台地址：域名一律用 https。
+  /// 微信扫码登录的 OAuth 回调必须 https，用 http 打开登录页扫码会直接失败。
+  static String _norm(String url) => AppConstants.normalizePospalUrl(url);
 
   Future<void> _diag(String msg) async {
     await LoginDiagLogger().log(msg);
@@ -129,9 +130,17 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     NavigationAction action,
   ) async {
     final u = action.request.url.toString();
-    if (u.startsWith('http://user.pospal.cn')) {
-      final httpsUrl = u.replaceFirst('http://', 'https://');
-      c.loadUrl(urlRequest: URLRequest(url: WebUri(httpsUrl)));
+    // 微信授权/OAuth 中间页必须走 https，http 会被微信拒绝（表现为扫码失败）
+    final host = Uri.tryParse(u)?.host ?? '';
+    final base = _norm(widget.baseUrl);
+    final baseHost = Uri.parse(base).host;
+    final upToHttps = u.startsWith('http://') &&
+        (host == 'user.pospal.cn' ||
+            host == 'open.weixin.qq.com' ||
+            (base.startsWith('https://') && host == baseHost));
+    if (upToHttps) {
+      c.loadUrl(urlRequest:
+          URLRequest(url: WebUri(u.replaceFirst('http://', 'https://'))));
       return NavigationActionPolicy.CANCEL;
     }
     return NavigationActionPolicy.ALLOW;
