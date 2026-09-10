@@ -159,8 +159,24 @@ class ServerTxtService {
     return text;
   }
 
-  /// 回传（覆盖）PIC 下同名 txt；成功返回 null，失败返回原因
+  /// 回传（覆盖）PIC 下同名 txt；成功返回 null，失败返回原因。
+  /// 补货服务器偶发“半死”（整站在 Cloudflare 侧会返回 error code: 502，
+  /// 也可能返回残缺/乱码响应），所以失败时自动重试一次再报错。
   Future<String?> uploadTxt(
+    String serverUrl,
+    String name,
+    String content,
+  ) async {
+    final first = await _uploadOnce(serverUrl, name, content);
+    if (first == null) return null;
+    await Future.delayed(const Duration(milliseconds: 800));
+    final second = await _uploadOnce(serverUrl, name, content);
+    if (second == null) return null;
+    return '$second（已自动重试 1 次）';
+  }
+
+  /// 单次上传（uploadTxt 的实际实现）
+  Future<String?> _uploadOnce(
     String serverUrl,
     String name,
     String content,
@@ -224,7 +240,13 @@ class ServerTxtService {
           }
         } catch (_) {}
       }
-      return 'HTTP ${resp.statusCode} 返回=$respBody（$postUrl）';
+      // 服务器偶尔处于“半死”状态（整站会返回 502，或返回残缺/乱码响应），
+      // 把响应长度与来源信息一并报出来，方便判断到底是哪一层在应答。
+      final ctype = resp.headers.value(HttpHeaders.contentTypeHeader) ?? '';
+      final srv = resp.headers.value('server') ?? '';
+      final hint = '长度${respBody.length}／类型${ctype.isEmpty ? '无' : ctype}／'
+          '来源${srv.isEmpty ? '未知' : srv}';
+      return 'HTTP ${resp.statusCode} 返回=$respBody（$hint，$postUrl）';
     } catch (e) {
       return e.toString();
     } finally {
