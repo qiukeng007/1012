@@ -129,6 +129,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   // 查询页手动更换的供货商（条码 -> 新供货商名，仅本次展示覆盖）
   final Map<String, String> _supplierOverrides = {};
   final Map<String, String> _productNameOverrides = {};
+  // 查询页手动修改的售价（商品身份键 -> 新售价，仅本次展示覆盖）
+  final Map<String, double> _sellPriceOverrides = {};
+  final Map<String, double> _buyPriceOverrides = {};
+  // 查询页手动修改的单位（商品身份键 -> 新单位，仅本次展示覆盖）
+  final Map<String, String> _unitOverrides = {};
 
   // 库存编辑
   String? _editStockKey;
@@ -1169,10 +1174,23 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                       style: TextStyle(
                           fontSize: 13, color: AppConstants.textSecondary)),
                   Expanded(
-                    child: Text(
-                      data.unit,
-                      style: const TextStyle(fontSize: 13),
-                      overflow: TextOverflow.ellipsis,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onDoubleTap: () => _showUnitEditor(data),
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              _unitOverrides[_productKey(data)] ?? data.unit,
+                              style: const TextStyle(fontSize: 13),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          const Icon(Icons.edit,
+                              size: 12, color: AppConstants.primaryColor),
+                        ],
+                      ),
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -1201,7 +1219,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             ),
             // 进价 + 售价同行
             if (data.buyPrice != null || data.sellPrice != null)
-              _buildPriceRow(data.buyPrice, data.sellPrice),
+              _buildPriceRow(data),
           ],
         ),
       ),
@@ -1643,31 +1661,56 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     );
   }
 
-  /// 进价 + 售价同行
-  Widget _buildPriceRow(double? buyPrice, double? sellPrice) {
+  /// 进价 + 售价同行（双击金额可修改并同步到银豹；单击不触发，避免误触）
+  Widget _buildPriceRow(ProductData data) {
+    final key = _productKey(data);
+    final buyPrice = _buyPriceOverrides[key] ?? data.buyPrice;
+    final sellPrice = _sellPriceOverrides[key] ?? data.sellPrice;
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Row(
         children: [
           if (buyPrice != null) ...[
-            const Icon(Icons.shopping_cart, size: 14, color: AppConstants.textSecondary),
-            const SizedBox(width: 4),
-            const Text('进价：', style: TextStyle(fontSize: 12, color: AppConstants.textSecondary)),
-            Text(
-              'R${_numberToChinese(buyPrice)}',
-              style: const TextStyle(fontSize: 12, color: Color(0xFF8B4513)),
+            GestureDetector(
+              onDoubleTap: () => _showPriceEditor(data, isBuy: true),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.shopping_cart, size: 14, color: AppConstants.textSecondary),
+                  const SizedBox(width: 4),
+                  const Text('进价：', style: TextStyle(fontSize: 12, color: AppConstants.textSecondary)),
+                  Text(
+                    'R${_numberToChinese(buyPrice)}',
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF8B4513)),
+                  ),
+                  const SizedBox(width: 3),
+                  const Icon(Icons.edit, size: 12, color: Color(0xFF8B4513)),
+                ],
+              ),
             ),
             const SizedBox(width: 12),
           ],
-          if (sellPrice != null) ...[
-            const Icon(Icons.monetization_on, size: 14, color: Colors.red),
-            const SizedBox(width: 4),
-            const Text('售价：', style: TextStyle(fontSize: 12, color: AppConstants.textSecondary)),
-            Text(
-              'R${sellPrice.toStringAsFixed(2)}',
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.red),
+          if (sellPrice != null)
+            GestureDetector(
+              onDoubleTap: () => _showPriceEditor(data, isBuy: false),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.monetization_on, size: 14, color: Colors.red),
+                    const SizedBox(width: 4),
+                    const Text('售价：', style: TextStyle(fontSize: 12, color: AppConstants.textSecondary)),
+                    Text(
+                      'R${sellPrice.toStringAsFixed(2)}',
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.red),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(Icons.edit, size: 12, color: Colors.red),
+                  ],
+                ),
+              ),
             ),
-          ],
         ],
       ),
     );
@@ -2374,8 +2417,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           config,
           barcode,
           opName,
-          '更新库存',
+          '更新库存${_fmtNum(qty)}（原库存${_fmtNum(product.stock)}）',
           productUid: product.uid?.toString(),
+          matchLabel: '更新库存',
         );
         _showBanner(descErr == null
             ? '库存已更新'
@@ -2507,6 +2551,43 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     );
   }
 
+  /// 总部模式（且所有门店都有门店ID）时返回用于官方同步的源店，否则返回 null
+  StoreConfig? _hqSyncSource() {
+    if (!ModeService.instance.isHqMode) return null;
+    if (widget.configs.isEmpty) return null;
+    if (widget.configs.any((c) => c.storeId.isEmpty)) return null;
+    return widget.configs.where((c) => c.enabled).firstOrNull ??
+        widget.configs.firstOrNull;
+  }
+
+  /// 本地立即生效：把某个字段改动应用到所选商品和所有门店卡片
+  void _applyToLocalProducts(ProductData Function(ProductData d) map) {
+    setState(() {
+      if (_chosenProduct != null) {
+        _chosenProduct = map(_chosenProduct!);
+      }
+      if (_lastResult != null) {
+        final stores = Map<String, StoreStockResult>.from(_lastResult!.stores);
+        for (final entry in stores.entries) {
+          final old = entry.value;
+          if (old.data == null) continue;
+          stores[entry.key] = StoreStockResult(
+            storeName: old.storeName,
+            data: map(old.data!),
+            error: old.error,
+            ok: old.ok,
+          );
+        }
+        _lastResult = MultiStoreResult(
+          barcode: _lastResult!.barcode,
+          stores: stores,
+          elapsedSeconds: _lastResult!.elapsedSeconds,
+          diagnostics: _lastResult!.diagnostics,
+        );
+      }
+    });
+  }
+
   /// 把查询页手动更换的供货商同步到银豹（仅勾选门店），并更新本地显示
   Future<void> _syncSupplierChange(
       ProductData data, String current, String newSupplier) async {
@@ -2519,6 +2600,45 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     final opName = await _ensureOperatorName();
     if (opName == null) {
       _showBanner('请填写操作员姓名后再更新供货商', isError: true);
+      return;
+    }
+    // 总部模式：供货商一次同步到全部门店（官方同步接口，快）
+    final hqSource = _hqSyncSource();
+    if (hqSource != null) {
+      if (!mounted) return;
+      setState(() => _syncingProductData = true);
+      _showBanner('正在同步供货商…', sticky: true);
+      try {
+        final targets = widget.configs
+            .where((c) => c.storeKey != hqSource.storeKey)
+            .toList();
+        final (globalErr, results) =
+            await widget.queryService.syncProductSupplierToStores(
+          source: hqSource,
+          targets: targets,
+          barcode: barcode,
+          newSupplierName: newSupplier,
+          productUid: data.uid?.toString(),
+          noteOperatorName: opName,
+          noteActionLabel: '更新供货商$newSupplier（原供货商$current）',
+          noteMatchLabel: '更新供货商',
+        );
+        final errors = <String>[
+          if (globalErr != null) '${hqSource.name}：$globalErr',
+          for (final r in results)
+            if (r.$2 != null) '${r.$1.name}：${r.$2}',
+        ];
+        if (!mounted) return;
+        if (errors.isEmpty) {
+          _supplierOverrides[barcode] = newSupplier;
+          _applyToLocalProducts((d) => d.copyWith(supplier: newSupplier));
+          _showBanner('供货商已更新为「$newSupplier」并同步全部门店 ✓');
+        } else {
+          _showBanner('供货商同步失败：${errors.join('；')}', isError: true);
+        }
+      } finally {
+        if (mounted) setState(() => _syncingProductData = false);
+      }
       return;
     }
     final targetStores = widget.configs.where((c) => c.enabled).toList();
@@ -2565,8 +2685,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
               store,
               barcode,
               opName,
-              '更新供货商',
+              '更新供货商$newSupplier（原供货商$current）',
               productUid: data.uid?.toString(),
+              matchLabel: '更新供货商',
             );
             if (err != null && err != '未登录') {
               descErrors.add('${store.name}：$err');
@@ -2649,6 +2770,47 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     final opName = await _ensureOperatorName();
     if (opName == null) {
       _showBanner('请填写操作员姓名后再更新名称', isError: true);
+      return;
+    }
+    // 总部模式：名称一次同步到全部门店（官方同步接口，快）
+    final hqSource = _hqSyncSource();
+    if (hqSource != null) {
+      final barcode =
+          data.barcode.isNotEmpty ? data.barcode : _lastResult?.barcode ?? '';
+      if (!mounted) return;
+      setState(() => _syncingProductData = true);
+      _showBanner('正在同步商品名称…', sticky: true);
+      try {
+        final targets = widget.configs
+            .where((c) => c.storeKey != hqSource.storeKey)
+            .toList();
+        final (globalErr, results) =
+            await widget.queryService.syncProductNameToStores(
+          source: hqSource,
+          targets: targets,
+          barcode: barcode,
+          newName: newName,
+          productUid: data.uid?.toString(),
+          noteOperatorName: opName,
+          noteActionLabel: '更新商品名称',
+          noteMatchLabel: '更新商品名称',
+        );
+        final errors = <String>[
+          if (globalErr != null) '${hqSource.name}：$globalErr',
+          for (final r in results)
+            if (r.$2 != null) '${r.$1.name}：${r.$2}',
+        ];
+        if (!mounted) return;
+        if (errors.isEmpty) {
+          _productNameOverrides[key] = newName;
+          _applyToLocalProducts((d) => d.copyWith(name: newName));
+          _showBanner('商品名称已更新为「$newName」并同步全部门店 ✓');
+        } else {
+          _showBanner('名称同步失败：${errors.join('；')}', isError: true);
+        }
+      } finally {
+        if (mounted) setState(() => _syncingProductData = false);
+      }
       return;
     }
     final targetStores = widget.configs.where((c) => c.enabled).toList();
@@ -2744,6 +2906,682 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     }
   }
 
+  /// 数字显示：去掉多余的小数（6.0→6，0.90→0.9，35.25→35.25）
+  String _fmtNum(double? v) {
+    if (v == null) return '—';
+    var s = v.toStringAsFixed(2);
+    if (s.contains('.')) {
+      s = s.replaceFirst(RegExp(r'0+$'), '');
+      s = s.replaceFirst(RegExp(r'\.$'), '');
+    }
+    return s;
+  }
+
+  /// 解析售价输入（允许 R 前缀、千分位逗号、空格），非法返回 null
+  double? _parseSellPriceInput(String raw) {
+    final t = raw
+        .trim()
+        .replaceAll('R', '')
+        .replaceAll('r', '')
+        .replaceAll(',', '')
+        .replaceAll(' ', '');
+    if (t.isEmpty) return null;
+    final v = double.tryParse(t);
+    if (v == null || v.isNaN || v.isInfinite || v < 0) return null;
+    return double.parse(v.toStringAsFixed(2));
+  }
+
+  /// 双击售价/进价：弹出编辑框，确定后同步
+  void _showPriceEditor(ProductData data, {required bool isBuy}) {
+    final key = _productKey(data);
+    final current = isBuy
+        ? (_buyPriceOverrides[key] ?? data.buyPrice)
+        : (_sellPriceOverrides[key] ?? data.sellPrice);
+    final label = isBuy ? '进价' : '售价';
+    final controller = TextEditingController(
+        text: current == null ? '' : current.toStringAsFixed(2));
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('修改商品$label', style: const TextStyle(fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '当前$label：R${current?.toStringAsFixed(2) ?? '—'}',
+              style: const TextStyle(
+                  fontSize: 12, color: AppConstants.textSecondary),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              textInputAction: TextInputAction.done,
+              onSubmitted: (v) {
+                final price = _parseSellPriceInput(v);
+                if (price == null) return;
+                Navigator.pop(ctx);
+                _syncPriceChange(data,
+                    sellPrice: isBuy ? null : price,
+                    buyPrice: isBuy ? price : null);
+              },
+              decoration: InputDecoration(
+                hintText: '输入新的$label，例如 35.00',
+                prefixText: 'R ',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              ModeService.instance.isHqMode
+                  ? '保存后同步到全部门店（总部模式走官方同步，速度快），并写入一条操作记录。'
+                  : '保存后同步到所有已勾选门店，并写入一条操作记录。',
+              style: const TextStyle(
+                  fontSize: 11, color: AppConstants.textSecondary),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppConstants.primaryColor,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () {
+              final price = _parseSellPriceInput(controller.text);
+              if (price == null) return;
+              Navigator.pop(ctx);
+              _syncPriceChange(data,
+                  sellPrice: isBuy ? null : price,
+                  buyPrice: isBuy ? price : null);
+            },
+            child: const Text('确定并同步'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 把新售价/进价同步到银豹，并更新本地所有门店卡片显示。
+  /// 总部模式：源店改价后走官方「同步商品到门店」接口一次推给全部门店（含未勾选），快；
+  /// 门店模式：逐店 FindProduct+SaveProduct，只处理已勾选门店。
+  Future<void> _syncPriceChange(
+    ProductData data, {
+    double? sellPrice,
+    double? buyPrice,
+  }) async {
+    final isBuy = buyPrice != null;
+    final newPrice = isBuy ? buyPrice : sellPrice;
+    if (newPrice == null) return;
+    final label = isBuy ? '进价' : '售价';
+    final key = _productKey(data);
+    final current = isBuy
+        ? (_buyPriceOverrides[key] ?? data.buyPrice)
+        : (_sellPriceOverrides[key] ?? data.sellPrice);
+    if (current != null && (current - newPrice).abs() < 0.005) {
+      _showBanner('$label未变化');
+      return;
+    }
+
+    // 总部模式：全部门店都归属同一总账号 → 走官方同步（快）
+    final hqMode = ModeService.instance.isHqMode;
+    final canOfficialSync =
+        hqMode && widget.configs.every((c) => c.storeId.isNotEmpty);
+    StoreConfig? hqSource;
+    if (canOfficialSync) {
+      hqSource = widget.configs.where((c) => c.enabled).firstOrNull ??
+          widget.configs.firstOrNull;
+    }
+    final targetStores = hqMode
+        ? <StoreConfig>[] // 总部模式由官方同步负责，逐店列表不用
+        : widget.configs.where((c) => c.enabled).toList();
+    if (!canOfficialSync && targetStores.isEmpty) {
+      _showBanner('未勾选任何门店，无法同步$label', isError: true);
+      return;
+    }
+    if (canOfficialSync && hqSource == null) {
+      _showBanner('没有可用门店，无法同步$label', isError: true);
+      return;
+    }
+
+    final opName = await _ensureOperatorName();
+    if (opName == null) {
+      _showBanner('请填写操作员姓名后再修改$label', isError: true);
+      return;
+    }
+    final barcode =
+        data.barcode.isNotEmpty ? data.barcode : _lastResult?.barcode ?? '';
+    if (!mounted) return;
+    setState(() => _syncingProductData = true);
+    _showBanner('正在同步商品$label…', sticky: true);
+    final priceText = _fmtNum(newPrice);
+    final oldPriceText = _fmtNum(current);
+    final errors = <String>[];
+    var syncedCount = 0;
+    // 需要写操作记录的门店
+    final noteStores = <StoreConfig>[];
+    try {
+      if (canOfficialSync && hqSource != null) {
+        final source = hqSource;
+        final targets = widget.configs
+            .where((c) => c.storeKey != source.storeKey)
+            .toList();
+        final (globalErr, results) =
+            await widget.queryService.syncProductPriceToStores(
+          source: source,
+          targets: targets,
+          barcode: barcode,
+          sellPrice: sellPrice,
+          buyPrice: buyPrice,
+          productUid: data.uid?.toString(),
+          noteOperatorName: opName,
+          noteActionLabel: '更新$label$priceText（原$label$oldPriceText）',
+          noteMatchLabel: '更新$label',
+        );
+        if (globalErr != null) {
+          errors.add('${source.name}：$globalErr');
+        }
+        for (final r in results) {
+          final err = r.$2;
+          if (err != null) errors.add('${r.$1.name}：$err');
+        }
+        syncedCount = 1 + results.where((r) => r.$2 == null).length;
+        // 操作记录已合并进源店商品描述，并随上面的官方同步（remarks=商品描述）
+        // 一起下发到所有门店，不用再逐店写一遍
+      } else {
+        for (final store in targetStores) {
+          try {
+            final err = await widget.queryService.updateProductPrice(
+              store,
+              barcode,
+              sellPrice: sellPrice,
+              buyPrice: buyPrice,
+              productUid: data.uid?.toString(),
+            );
+            if (err == null) {
+              syncedCount++;
+            } else if (err != '未登录') {
+              errors.add('${store.name}：$err');
+            }
+          } catch (e) {
+            errors.add('${store.name}：$e');
+          }
+        }
+        noteStores.addAll(targetStores);
+      }
+      if (!mounted) return;
+      // 本地立即生效：覆盖表 + 所选商品 + 所有门店卡片统一显示新价格
+      setState(() {
+        if (isBuy) {
+          _buyPriceOverrides[key] = newPrice;
+        } else {
+          _sellPriceOverrides[key] = newPrice;
+        }
+        if (_chosenProduct != null) {
+          _chosenProduct = _chosenProduct!.copyWith(
+            sellPrice: isBuy ? null : newPrice,
+            buyPrice: isBuy ? newPrice : null,
+          );
+        }
+        if (_lastResult != null) {
+          final stores = Map<String, StoreStockResult>.from(_lastResult!.stores);
+          for (final entry in stores.entries) {
+            final old = entry.value;
+            if (old.data == null) continue;
+            stores[entry.key] = StoreStockResult(
+              storeName: old.storeName,
+              data: old.data!.copyWith(
+                sellPrice: isBuy ? null : newPrice,
+                buyPrice: isBuy ? newPrice : null,
+              ),
+              error: old.error,
+              ok: old.ok,
+            );
+          }
+          _lastResult = MultiStoreResult(
+            barcode: _lastResult!.barcode,
+            stores: stores,
+            elapsedSeconds: _lastResult!.elapsedSeconds,
+            diagnostics: _lastResult!.diagnostics,
+          );
+        }
+      });
+      if (errors.isEmpty) {
+        if (syncedCount == 0) {
+          _showBanner('门店都没有登录，无法同步', isError: true);
+          return;
+        }
+        // 操作记录描述（失败不阻断，静默忽略）；4 路并发，门店多也不慢
+        final descErrors = <String>[];
+        const int maxNoteConcurrent = 4;
+        var noteIndex = 0;
+        Future<void> noteWorker() async {
+          while (true) {
+            final i = noteIndex++;
+            if (i >= noteStores.length) return;
+            final store = noteStores[i];
+            try {
+              final err = await widget.queryService.updateProductOperationNote(
+                store,
+                barcode,
+                opName,
+                '更新$label$priceText（原$label$oldPriceText）',
+                productUid: data.uid?.toString(),
+                matchLabel: '更新$label',
+              );
+              if (err != null && err != '未登录') {
+                descErrors.add('${store.name}：$err');
+              }
+            } catch (e) {
+              descErrors.add('${store.name}：$e');
+            }
+          }
+        }
+
+        final noteWorkers = noteStores.length < maxNoteConcurrent
+            ? noteStores.length
+            : maxNoteConcurrent;
+        await Future.wait(
+            List<Future<void>>.generate(noteWorkers, (_) => noteWorker()));
+        _showBanner(descErrors.isEmpty
+            ? '$label已更新为 R$priceText ✓'
+            : '$label已更新为 R$priceText，描述未写入：${descErrors.join('；')}',
+            isError: descErrors.isNotEmpty);
+      } else {
+        _showBanner('部分同步失败：${errors.join('；')}', isError: true);
+      }
+    } finally {
+      if (mounted) setState(() => _syncingProductData = false);
+    }
+  }
+
+  /// 双击单位：只从该门店「已有的单位」里选（不支持自定义输入，避免银豹报错）
+  Future<void> _showUnitEditor(ProductData data) async {
+    final key = _productKey(data);
+    final current = _unitOverrides[key] ?? data.unit;
+    final currentText = (current.isEmpty || current == '—') ? '' : current;
+    // 单位列表取自第一个勾选的门店（总部模式下它就是官方同步的源店）
+    final unitStore = widget.configs.where((c) => c.enabled).firstOrNull ??
+        widget.configs.firstOrNull;
+    if (unitStore == null) {
+      _showCopyableError('无法修改单位', '当前没有可用门店配置，请先在配置页添加并登录门店。');
+      return;
+    }
+    _showBanner('正在读取门店单位…', sticky: true);
+    final res = await widget.queryService.fetchStoreUnits(unitStore);
+    if (!mounted) return;
+    final units = res.units;
+    final unitErr = res.error ?? '';
+    if (units.isEmpty) {
+      _showBanner('读取单位失败', isError: true);
+      _showCopyableError(
+        '读取门店单位失败',
+        '门店：${unitStore.name}\n'
+        '原因：${unitErr.isEmpty ? '该门店还没有商品单位' : unitErr}\n\n'
+        '单位只能从银豹后台已有的单位里选，请先在该门店「商品单位」里新增后再试。',
+      );
+      return;
+    }
+    _showBanner('已读取 ${units.length} 个单位');
+    var selected = currentText;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('修改商品单位', style: TextStyle(fontSize: 16)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '当前单位：${currentText.isEmpty ? '无' : currentText}',
+                  style: const TextStyle(
+                      fontSize: 12, color: AppConstants.textSecondary),
+                ),
+                const SizedBox(height: 8),
+                Text('${unitStore.name} 已有的单位（只能选，不能自己新增）：',
+                    style: const TextStyle(
+                        fontSize: 11, color: AppConstants.textSecondary)),
+                const SizedBox(height: 6),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 260),
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: units
+                        .map((u) => ListTile(
+                              dense: true,
+                              leading: Icon(
+                                u.$2 == selected
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_off,
+                                color: u.$2 == selected
+                                    ? AppConstants.primaryColor
+                                    : AppConstants.textSecondary,
+                              ),
+                              title: Text(u.$2,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis),
+                              selected: u.$2 == selected,
+                              onTap: () =>
+                                  setDialogState(() => selected = u.$2),
+                            ))
+                        .toList(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  ModeService.instance.isHqMode
+                      ? '保存后同步到全部门店，并写入一条操作记录。'
+                      : '保存后同步到所有已勾选门店，并写入一条操作记录。',
+                  style: const TextStyle(
+                      fontSize: 11, color: AppConstants.textSecondary),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _showUnitDiagnostic(data);
+              },
+              child: const Text('诊断'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppConstants.primaryColor,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: selected.isEmpty
+                  ? null
+                  : () {
+                      final v = selected;
+                      Navigator.pop(ctx);
+                      _syncUnitChange(data, v);
+                    },
+              child: const Text('确定并同步'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 单位字段诊断：把门店单位列表 + 商品里的单位字段原文 + 列表显示的单位
+  /// 全部弹出来，可长按选中或点复制发给管理员
+  Future<void> _showUnitDiagnostic(ProductData data) async {
+    final barcode =
+        data.barcode.isNotEmpty ? data.barcode : _lastResult?.barcode ?? '';
+    final unitStore = widget.configs.where((c) => c.enabled).firstOrNull ??
+        widget.configs.firstOrNull;
+    if (unitStore == null || barcode.isEmpty) {
+      _showCopyableError('无法诊断', '没有可用门店或条码为空。');
+      return;
+    }
+    _showBanner('正在读取单位诊断…', sticky: true);
+    final text = await widget.queryService
+        .buildUnitDiagnostic(unitStore, barcode, productUid: data.uid?.toString());
+    if (!mounted) return;
+    _showBanner('诊断已生成');
+    _showCopyableError('单位字段诊断（复制发给管理员）', text);
+  }
+
+  /// 把新单位同步到银豹，并更新本地所有门店卡片显示。
+  /// 总部模式：先比对各门店单位 UID —— 一样则官方同步一次推全部门店（快）；
+  /// 不一样（或某店没有该单位）则逐店更新，每店用各自的 UID（稳）。
+  /// 门店模式：逐店 FindProduct+SaveProduct，只处理已勾选门店。
+  /// 任何失败都弹「可复制」的报错窗口，并写进操作记录，事后也能翻出来。
+  Future<void> _syncUnitChange(ProductData data, String newUnit) async {
+    final key = _productKey(data);
+    final current = _unitOverrides[key] ?? data.unit;
+    final currentText = (current.isEmpty || current == '—') ? '' : current;
+    if (newUnit.isEmpty) {
+      _showBanner('单位不能为空', isError: true);
+      return;
+    }
+    if (newUnit == currentText) {
+      _showBanner('单位未变化');
+      return;
+    }
+    final oldText = currentText.isEmpty ? '无' : currentText;
+
+    final hqMode = ModeService.instance.isHqMode;
+    final canOfficialSync =
+        hqMode && widget.configs.every((c) => c.storeId.isNotEmpty);
+    StoreConfig? hqSource;
+    if (canOfficialSync) {
+      hqSource = widget.configs.where((c) => c.enabled).firstOrNull ??
+          widget.configs.firstOrNull;
+    }
+    final targetStores = hqMode
+        ? <StoreConfig>[]
+        : widget.configs.where((c) => c.enabled).toList();
+    if (!canOfficialSync && targetStores.isEmpty) {
+      _showCopyableError('无法同步单位',
+          '没有勾选任何门店。请在门店卡片上勾选要同步的门店后重试。');
+      return;
+    }
+    if (canOfficialSync && hqSource == null) {
+      _showCopyableError('无法同步单位', '没有可用门店（门店配置为空或全部无门店ID）。');
+      return;
+    }
+
+    final opName = await _ensureOperatorName();
+    if (opName == null) {
+      _showBanner('请填写操作员姓名后再修改单位', isError: true);
+      return;
+    }
+    final barcode =
+        data.barcode.isNotEmpty ? data.barcode : _lastResult?.barcode ?? '';
+    if (!mounted) return;
+    setState(() => _syncingProductData = true);
+    _showBanner('正在同步商品单位…', sticky: true);
+    final noteLabel = '更新单位$newUnit（原单位$oldText）';
+    final errors = <String>[];
+    final warnings = <String>[];
+    final storeNotes = <String>[];
+    var syncedCount = 0;
+    final noteStores = <StoreConfig>[];
+    try {
+      if (canOfficialSync && hqSource != null) {
+        final source = hqSource;
+        final targets = widget.configs
+            .where((c) => c.storeKey != source.storeKey)
+            .toList();
+        final res = await widget.queryService.syncProductUnitToStores(
+          source: source,
+          targets: targets,
+          barcode: barcode,
+          unitName: newUnit,
+          productUid: data.uid?.toString(),
+          noteOperatorName: opName,
+          noteActionLabel: noteLabel,
+          noteMatchLabel: '更新单位',
+        );
+        if (res.globalErr != null) {
+          errors.add('${source.name}：${res.globalErr}');
+          storeNotes.add('${source.name}：${res.globalErr}');
+        }
+        for (final r in res.results) {
+          if (r.$2 != null) {
+            errors.add('${r.$1.name}：${r.$2}');
+            storeNotes.add('${r.$1.name}：${r.$2}');
+          } else {
+            storeNotes.add('${r.$1.name}：成功');
+          }
+        }
+        syncedCount = res.results.where((r) => r.$2 == null).length;
+        if (res.repaired.isNotEmpty) {
+          warnings.add('${res.repaired.map((s) => s.name).join('、')}'
+              '单位编号与其他门店不同，已单独补写');
+          // 补写的门店再写一次商品描述，保证描述与单位一致
+          noteStores.addAll(res.repaired);
+        }
+      } else {
+        for (final store in targetStores) {
+          try {
+            final err = await widget.queryService.updateProductUnit(
+              store,
+              barcode,
+              unitName: newUnit,
+              productUid: data.uid?.toString(),
+            );
+            if (err == null) {
+              syncedCount++;
+              storeNotes.add('${store.name}：成功');
+            } else if (err == '未登录') {
+              errors.add('${store.name}：未登录（请先在配置页登录该门店再试）');
+              storeNotes.add('${store.name}：未登录');
+            } else {
+              errors.add('${store.name}：$err');
+              storeNotes.add('${store.name}：$err');
+            }
+          } catch (e) {
+            errors.add('${store.name}：$e');
+            storeNotes.add('${store.name}：$e');
+          }
+        }
+        noteStores.addAll(targetStores);
+      }
+      if (!mounted) return;
+      if (errors.isEmpty) {
+        setState(() => _unitOverrides[key] = newUnit);
+        _applyToLocalProducts((d) => d.copyWith(unit: newUnit));
+        final descErrors = <String>[];
+        for (final store in noteStores) {
+          try {
+            final err = await widget.queryService.updateProductOperationNote(
+              store,
+              barcode,
+              opName,
+              noteLabel,
+              productUid: data.uid?.toString(),
+              matchLabel: '更新单位',
+            );
+            if (err != null && err != '未登录') {
+              descErrors.add('${store.name}：$err');
+            }
+          } catch (e) {
+            descErrors.add('${store.name}：$e');
+          }
+        }
+        final tail = warnings.isEmpty ? '' : '（${warnings.join('；')}）';
+        if (descErrors.isEmpty) {
+          _showBanner('单位已更新为「$newUnit」✓$tail');
+        } else {
+          final descTxt = descErrors.map(_oneLine).join('\n');
+          final report = '商品：${data.name}（条码 $barcode）\n'
+              '新单位：$newUnit\n\n'
+              '单位已经改成功，但操作记录没写进去：\n$descTxt';
+          OperationLogService.add(
+            store: '单位更新',
+            action: '描述写入失败',
+            barcode: barcode,
+            detail: '商品：${data.name}（条码 $barcode）\n'
+                '单位已改成功，但操作记录没写进去：\n$descTxt',
+            name: data.name,
+            errorDetail: descErrors.join('\n'),
+          );
+          _showCopyableError('单位已更新，但操作记录未写入', report);
+        }
+      } else {
+        final storeSummary = storeNotes.map(_oneLine).join('\n');
+        final report = '商品：${data.name}（条码 $barcode）\n'
+            '新单位：$newUnit\n'
+            '原单位：$oldText\n'
+            '当前模式：${hqMode ? '总部模式' : '门店模式'}\n\n'
+            '各门店结果：\n$storeSummary\n\n'
+            '错误明细：\n${errors.join('\n')}';
+        OperationLogService.add(
+          store: '单位更新',
+          action: '更新失败',
+          barcode: barcode,
+          detail: '商品：${data.name}（条码 $barcode）\n'
+              '新单位：$newUnit（原单位$oldText）\n'
+              '各门店结果：\n$storeSummary',
+          name: data.name,
+          errorDetail: report,
+        );
+        _showCopyableError('单位更新失败', report);
+      }
+    } catch (e, st) {
+      final report = '商品：${data.name}（条码 $barcode）\n'
+          '新单位：$newUnit\n'
+          '异常：$e\n\n'
+          '技术细节：\n$st';
+      OperationLogService.add(
+        store: '单位更新',
+        action: '更新异常',
+        barcode: barcode,
+        detail: '商品：${data.name}（条码 $barcode）\n'
+            '新单位：$newUnit\n异常：${_oneLine(e.toString())}',
+        name: data.name,
+        errorDetail: report,
+      );
+      if (mounted) _showCopyableError('单位更新出错', report);
+    } finally {
+      if (mounted) setState(() => _syncingProductData = false);
+    }
+  }
+
+  /// 操作记录里只留一行结论，完整报错放 errorDetail（卡片里点开可复制）
+  static String _oneLine(String text, {int maxChars = 100}) {
+    final line = text.split('\n').first.trim();
+    return line.length <= maxChars ? line : '${line.substring(0, maxChars)}…';
+  }
+
+  /// 可复制的报错弹窗（长报错不要只留一句提示）
+  void _showCopyableError(String title, String detail) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.error_outline, color: Colors.red, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(title, style: const TextStyle(fontSize: 16)),
+            ),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            detail,
+            style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
+          TextButton.icon(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: detail));
+              if (ctx.mounted) Navigator.pop(ctx);
+              if (mounted) _showBanner('报错内容已复制');
+            },
+            icon: const Icon(Icons.copy, size: 16),
+            label: const Text('复制'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showSourcePicker(String targetKey) {
     final keys = _getStoreKeys();
     final otherKeys = keys.where((k) => k != targetKey).toList();
@@ -2802,6 +3640,29 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     return stock.toStringAsFixed(2);
   }
 
+  /// 给单个门店写一条库存类操作记录（[line] 是整行文字，[matchKey] 用于覆盖同类行）
+  Future<void> _writeStockNote(
+    StoreConfig store,
+    String barcode,
+    String line,
+    String matchKey,
+    String opName,
+    String? productUid,
+  ) async {
+    try {
+      await widget.queryService.updateProductOperationNote(
+        store,
+        barcode,
+        opName,
+        line,
+        productUid: productUid,
+        matchLabel: matchKey,
+      );
+    } catch (_) {
+      // 记录写入失败不阻断调货
+    }
+  }
+
   Future<void> _confirmTransfer() async {
     if (_transferQty == 0 || _lastResult == null) return;
     final qty = _transferQty.abs();
@@ -2836,6 +3697,13 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             orElse: () => _lastResult!.stores.values.first)
         .data?.barcode ?? _lastResult!.barcode);
     if (barcode.isEmpty) return;
+
+    // 调货也会改库存，需要操作员姓名写商品描述（已保存过则不弹窗）
+    final opName = await _ensureOperatorName();
+    if (opName == null) {
+      if (mounted) _showBanner('请填写操作员姓名后再调货', isError: true);
+      return;
+    }
 
     setState(() => _querying = true);
 
@@ -2908,6 +3776,25 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             barcode: barcode,
             detail: '调出 $qty 件',
           );
+          // 门店模式调货＝直接改两店库存，各写自己的「更新库存」记录
+          await Future.wait([
+            _writeStockNote(
+              sourceConfig,
+              barcode,
+              '更新库存${_fmtNum(newSrcStock)}（原库存${_fmtNum(srcStock)}）',
+              '更新库存',
+              opName,
+              srcData.uid?.toString(),
+            ),
+            _writeStockNote(
+              targetConfig,
+              barcode,
+              '更新库存${_fmtNum(newTgtStock)}（原库存${_fmtNum(tgtStock)}）',
+              '更新库存',
+              opName,
+              tgtData.uid?.toString(),
+            ),
+          ]);
           _query(barcode);
         } else {
           final parts = <String>[
@@ -2946,6 +3833,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           barcode: barcode,
           detail: '调出 $qty 件',
         );
+        // 总部模式调货走货流单据，商品描述不再写调货记录
         _query(barcode);
       } else {
         // 调货失败 → 弹窗 + 可分享

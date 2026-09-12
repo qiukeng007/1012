@@ -24,7 +24,7 @@ class _RecordsPageState extends State<RecordsPage> {
 
   Future<void> _load() async {
     final logs = await OperationLogService.getAll();
-    final favorites = await OperationLogService.getFavoriteBarcodes();
+    final favorites = await OperationLogService.getFavoriteIds();
     if (mounted) {
       setState(() {
         _favorites = favorites;
@@ -34,21 +34,20 @@ class _RecordsPageState extends State<RecordsPage> {
     }
   }
 
-  /// 收藏（按条码）的记录置顶，其余保持原有先后顺序
+  /// 收藏（按记录）的条目置顶，其余保持原有先后顺序
   List<OperationLog> _sortedLogs(
       List<OperationLog> logs, Set<String> favorites) {
     final fav = <OperationLog>[];
     final rest = <OperationLog>[];
     for (final log in logs) {
-      (favorites.contains(log.barcode) ? fav : rest).add(log);
+      (favorites.contains(log.id) ? fav : rest).add(log);
     }
     return [...fav, ...rest];
   }
 
   Future<void> _toggleFavorite(OperationLog log) async {
-    if (log.barcode.isEmpty) return;
-    final updated =
-        await OperationLogService.toggleFavoriteBarcode(log.barcode);
+    if (log.id.isEmpty) return;
+    final updated = await OperationLogService.toggleFavoriteId(log.id);
     if (!mounted) return;
     setState(() {
       _favorites = updated;
@@ -100,7 +99,7 @@ class _RecordsPageState extends State<RecordsPage> {
                   itemCount: _logs.length,
                   itemBuilder: (_, i) {
                     final log = _logs[i];
-                    final fav = _favorites.contains(log.barcode);
+                    final fav = _favorites.contains(log.id);
                     return Card(
                       margin: const EdgeInsets.only(bottom: 8),
                       color: fav ? const Color(0xFFFFF8E1) : null,
@@ -138,7 +137,7 @@ class _RecordsPageState extends State<RecordsPage> {
                                   padding: EdgeInsets.zero,
                                   constraints: const BoxConstraints(
                                       minWidth: 32, minHeight: 32),
-                                  tooltip: fav ? '取消收藏' : '收藏（置顶）',
+                                  tooltip: fav ? '取消收藏' : '收藏这条（置顶）',
                                   icon: Icon(
                                     fav ? Icons.star : Icons.star_border,
                                     size: 20,
@@ -176,6 +175,21 @@ class _RecordsPageState extends State<RecordsPage> {
                                 const SizedBox(height: 4),
                                 Text(log.detail!, style: const TextStyle(fontSize: 11, color: AppConstants.textSecondary)),
                               ],
+                              if (log.errorDetail != null && log.errorDetail!.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                InkWell(
+                                  onTap: () => _showFullError(log),
+                                  child: Row(mainAxisSize: MainAxisSize.min, children: const [
+                                    Icon(Icons.error_outline, size: 13, color: AppConstants.errorColor),
+                                    SizedBox(width: 4),
+                                    Text('查看/复制完整报错',
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            color: AppConstants.errorColor,
+                                            decoration: TextDecoration.underline)),
+                                  ]),
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -191,6 +205,40 @@ class _RecordsPageState extends State<RecordsPage> {
         backgroundColor: Colors.orange,
         foregroundColor: Colors.white,
         elevation: 2,
+      ),
+    );
+  }
+
+  /// 完整报错（含原始返回内容）单独弹窗：可全选/一键复制，关掉后还能再打开
+  void _showFullError(OperationLog log) {
+    final text = log.errorDetail ?? '';
+    if (text.isEmpty) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('完整报错', style: TextStyle(fontSize: 16)),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: SelectableText(text,
+                style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('已复制完整报错', style: TextStyle(fontSize: 13)),
+                duration: Duration(seconds: 1),
+                behavior: SnackBarBehavior.floating,
+                width: 240,
+              ));
+            },
+            child: const Text('复制全部'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
+        ],
       ),
     );
   }

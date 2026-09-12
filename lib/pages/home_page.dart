@@ -11,6 +11,7 @@ import '../models/restock_prefill_data.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/auth_service.dart';
@@ -85,6 +86,15 @@ class _HomePageState extends State<HomePage>
 
   RestockPrefillData? _prefillData;
   bool _silentSupplierFetched = false;
+  /// 首页右上角「图片数量」：门店库存卡片左边那家店（第一个已勾选门店）
+  /// 「商品图片：已设置」的商品种数
+  int? _imageCount;
+  bool _imageCountLoading = false;
+  DateTime? _imageCountAt;
+  String _imageCountStoreName = '';
+  /// 最近一次取数的接口原文（长按数字可复制，用于核对电脑端与手机端差异）
+  String _imageCountDiag = '';
+  static const String _imageCountCachePrefix = 'image_count_';
   int _settingsRefreshTick = 0;
   final ValueNotifier<({String barcode, String imageUrl})?>
       _restockImageNotifier = ValueNotifier(null);
@@ -183,6 +193,9 @@ class _HomePageState extends State<HomePage>
             _restockService = RestockService(restockConfig);
             _printerConfigs = printers;
           });
+        // 门店勾选变化后，右上角图片数量跟着换成对应门店的记录
+        await _loadCachedImageCount();
+        if (_imageCount == null) unawaited(_refreshImageCount());
       } catch (_) {}
       return;
     }
@@ -216,6 +229,9 @@ class _HomePageState extends State<HomePage>
           _restockService = RestockService(restockConfig);
           _loading = false;
         });
+        // 首页右上角图片数量：先显示上次缓存，再后台刷新一次
+        await _loadCachedImageCount();
+        unawaited(_refreshImageCount());
         // 首次使用：没有服务器地址则先弹窗填写
         var effectiveConfig = restockConfig;
         if (effectiveConfig.serverUrl.isEmpty) {
@@ -336,6 +352,8 @@ class _HomePageState extends State<HomePage>
         _verifying = false;
       });
     }
+    // 启动时可能还没登录好，自动登录结束后补一次图片数量
+    if (_imageCount == null) unawaited(_refreshImageCount());
   }
 
   Future<void> _verifyOneStore(int i, StoreConfig config) async {
@@ -911,6 +929,130 @@ class _HomePageState extends State<HomePage>
     }
   }
 
+  /// 门店库存卡片左边那家店 = 第一个已勾选门店（与搜索页 store1 对齐）
+  StoreConfig? get _firstEnabledStore {
+    for (final c in _configs) {
+      if (c.enabled) return c;
+    }
+    return null;
+  }
+
+  /// 读取缓存的图片数量（启动/切换门店时先显示，避免空白）
+  Future<void> _loadCachedImageCount() async {
+    final store = _firstEnabledStore;
+    if (store == null) {
+      if (mounted) setState(() => _imageCount = null);
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getInt('$_imageCountCachePrefix${store.storeKey}');
+    final ts = prefs.getInt('$_imageCountCachePrefix${store.storeKey}_at');
+    if (!mounted) return;
+    setState(() {
+      _imageCount = v;
+      _imageCountStoreName = store.name;
+      _imageCountAt =
+          ts == null ? null : DateTime.fromMillisecondsSinceEpoch(ts);
+    });
+  }
+
+  /// 刷新图片数量（manual=true 时失败会弹可复制报错）
+  Future<void> _refreshImageCount({bool manual = false}) async {
+    if (_imageCountLoading) return;
+    final store = _firstEnabledStore;
+    if (store == null) {
+      if (mounted) setState(() => _imageCount = null);
+      if (manual) {
+        await _showCopyableInfo(
+            '没有已勾选的门店。\n\n请先到「配置 → ID数据管理」勾选要查询的门店，再刷新。');
+      }
+      return;
+    }
+    setState(() {
+      _imageCountLoading = true;
+      _imageCountStoreName = store.name;
+    });
+    final startedAt = DateTime.now();
+    final res = await _queryService.fetchImageProductCount(store);
+    // 至少让「跳动的三个点」显示 700ms，避免太快看不到反馈
+    final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
+    if (elapsedMs < 700) {
+      await Future.delayed(Duration(milliseconds: 700 - elapsedMs));
+    }
+    if (!mounted) return;
+    if (!res.ok || res.count == null) {
+      setState(() {
+        _imageCountLoading = false;
+        _imageCountDiag = res.diagnostic ?? '';
+      });
+      if (manual) {
+        await _showCopyableInfo('图片数量获取失败\n\n'
+            '门店：${store.name}\n'
+            '原因：${res.error ?? '未知'}\n\n'
+            '${res.diagnostic ?? ''}');
+      }
+      return;
+    }
+    final now = DateTime.now();
+    setState(() {
+      _imageCount = res.count;
+      _imageCountLoading = false;
+      _imageCountAt = now;
+      _imageCountDiag = res.diagnostic ?? '';
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('$_imageCountCachePrefix${store.storeKey}', res.count!);
+    await prefs.setInt('$_imageCountCachePrefix${store.storeKey}_at',
+        now.millisecondsSinceEpoch);
+  }
+
+  /// 点数字看详情（门店/数量/更新时间，可复制）
+  Future<void> _showImageCountDetail() async {
+    final store = _firstEnabledStore;
+    final name = store?.name ??
+        (_imageCountStoreName.isEmpty ? '—' : _imageCountStoreName);
+    final at = _imageCountAt;
+    final when = at == null
+        ? '尚未获取'
+        : '${at.month.toString().padLeft(2, '0')}-${at.day.toString().padLeft(2, '0')} '
+            '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+    await _showCopyableInfo('图片数量（商品图片：已设置）\n\n'
+        '门店：$name\n'
+        '数量：${_imageCount ?? '—'} 种商品\n'
+        '更新时间：$when\n\n'
+        '取值：门店库存卡片左边那家店；点顶部的数字即可手动刷新。'
+        '${_imageCountDiag.isEmpty ? '' : '\n\n—— 接口原文（核对用）——\n$_imageCountDiag'}');
+  }
+
+  /// 可复制弹窗（长文本可选中 + 一键复制）
+  Future<void> _showCopyableInfo(String msg) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('图片数量'),
+        content: SingleChildScrollView(
+          child: SelectableText(msg, style: const TextStyle(fontSize: 13)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: msg));
+              Navigator.of(ctx).pop();
+              ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('已复制到剪贴板')));
+            },
+            child: const Text('复制'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _onConfigChanged() {
     _loadConfigs(skipVerify: true);
   }
@@ -1018,6 +1160,48 @@ class _HomePageState extends State<HomePage>
               ),
           ],
         ),
+        // 图片数量：固定贴 AppBar 最右侧，不挤标题行里的小绿点/离线角标
+        actions: [
+          // 图片数量（门店库存卡片左边那家店：商品图片=已设置的商品种数）
+          // 点数字 = 手动刷新；长按 = 查看门店/更新时间明细
+          GestureDetector(
+            onTap: _imageCountLoading
+                ? null
+                : () => _refreshImageCount(manual: true),
+            onLongPress: _showImageCountDetail,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.20),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.image_outlined,
+                      size: 13, color: Colors.white),
+                  const SizedBox(width: 3),
+                  // 刷新中显示三个跳动的点，避免"点了没反应"的错觉
+                  if (_imageCountLoading)
+                    const SizedBox(
+                      height: 16,
+                      width: 20,
+                      child: Center(child: _BouncingDots()),
+                    )
+                  else
+                    Text(
+                      _imageCount?.toString() ?? '—',
+                      style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+        ],
         backgroundColor: AppConstants.primaryColor,
         foregroundColor: Colors.white,
         elevation: 0,
@@ -1194,4 +1378,57 @@ class _PhotoQueueTriColorRingPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+/// 三个跳动的白点：图片数量刷新中的进度反馈
+class _BouncingDots extends StatefulWidget {
+  const _BouncingDots();
+
+  @override
+  State<_BouncingDots> createState() => _BouncingDotsState();
+}
+
+class _BouncingDotsState extends State<_BouncingDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: List.generate(3, (i) {
+            // 依次跳动：每个点在自己的 1/3 周期里上下移动
+            final t = (_controller.value * 3 - i).clamp(0.0, 1.0);
+            final dy = t < 0.5 ? -4.0 * (t * 2) : -4.0 * (1 - (t - 0.5) * 2);
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 1.5),
+              child: Transform.translate(
+                offset: Offset(0, dy),
+                child: Container(
+                  width: 4,
+                  height: 4,
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+            );
+          }),
+        );
+      },
+    );
+  }
 }

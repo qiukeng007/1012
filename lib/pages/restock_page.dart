@@ -8,6 +8,7 @@ import '../widgets/crop_page.dart';
 import '../models/restock_prefill_data.dart';
 import '../models/store_config.dart';
 import '../services/product_image_cache.dart';
+import '../services/mode_service.dart';
 import '../services/restock_service.dart';
 import '../services/query_service.dart';
 import '../services/operation_log_service.dart';
@@ -507,8 +508,9 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                 store,
                 submittedBarcode,
                 opName,
-                '更新供货商',
+                '更新供货商$currentSupplier（原供货商$originalSupplier）',
                 productUid: _productUid,
+                matchLabel: '更新供货商',
               );
             }
           }
@@ -575,14 +577,66 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     }
   }
 
-  /// 把补货界面修改后的供货商同步到银豹（仅勾选门店）
+  /// 总部模式：用官方「同步商品到门店」一次把供货商推给全部门店（含未勾选门店）。
+  /// 返回 handled=false 表示当前不是总部模式、或同步不可用，由逐店方式兜底。
+  Future<({bool handled, String? error})> _syncSupplierToAllStores(
+      String newSupplierName) async {
+    await ModeService.instance.ensureLoaded();
+    if (!ModeService.instance.isHqMode) return (handled: false, error: null);
+    final queryService = widget.queryService;
+    final all =
+        (widget.configs ?? []).where((c) => c.storeId.isNotEmpty).toList();
+    if (queryService == null || all.length < 2) {
+      return (handled: false, error: null);
+    }
+    var source = all.first;
+    for (final c in all) {
+      if (c.enabled) {
+        source = c;
+        break;
+      }
+    }
+    final targets = all.where((c) => c.storeKey != source.storeKey).toList();
+    final original = _originalSupplier?.trim() ?? '';
+    final note = original.isEmpty
+        ? '更新供货商$newSupplierName'
+        : '更新供货商$newSupplierName（原供货商$original）';
+    try {
+      final (globalErr, results) =
+          await queryService.syncProductSupplierToStores(
+        source: source,
+        targets: targets,
+        barcode: _barcodeCtrl.text,
+        newSupplierName: newSupplierName,
+        productUid: _productUid,
+        noteOperatorName: widget.service.operatorName.trim(),
+        noteActionLabel: note,
+        noteMatchLabel: '更新供货商',
+      );
+      if (globalErr != null) return (handled: false, error: null);
+      final errors = <String>[
+        for (final r in results)
+          if (r.$2 != null) '${r.$1.name}：${r.$2}',
+      ];
+      if (errors.isNotEmpty) return (handled: false, error: null);
+      return (handled: true, error: null);
+    } catch (_) {
+      return (handled: false, error: null);
+    }
+  }
+
+  /// 把补货界面修改后的供货商同步到银豹
+  /// 总部模式一次同步全部门店；门店模式只同步勾选门店
   /// 返回 null 表示全部同步成功，否则返回错误信息（补货不受影响）
   Future<String?> _syncSupplierToPospal(String newSupplierName) async {
     final queryService = widget.queryService;
     if (queryService == null || widget.configs == null) {
       return '未配置门店，无法同步';
     }
-    // 补货提交只同步到勾选（enabled）门店
+    // 总部模式：供货商一次同步到全部门店
+    final hq = await _syncSupplierToAllStores(newSupplierName);
+    if (hq.handled) return hq.error;
+    // 门店模式（或总部同步不可用时兜底）只同步到勾选（enabled）门店
     final configs = widget.configs!
         .where((c) => c.enabled && (c.storeId.isNotEmpty || c.isValid))
         .toList();

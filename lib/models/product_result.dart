@@ -248,3 +248,19 @@ class StoreStockResult {
     required this.ok,
   });
 }
+
+/// 单门店「商品图片：已设置」的商品种数统计结果（首页右上角图片数量）
+class ImageCountResult {
+  /// 商品种数；失败时为 null
+  final int? count;
+
+  /// 失败原因（面向用户，可直接复制）
+  final String? error;
+
+  /// 取证信息：门店/userId、请求地址、HTTP 状态、响应体片段、筛选项解析情况
+  final String? diagnostic;
+
+  const ImageCountResult({this.count, this.error, this.diagnostic});
+
+  bool get ok => count != null && error == null;
+}

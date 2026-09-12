@@ -12,6 +12,7 @@ class OperationLog {
   final String? name;      // 商品名称快照
   final String? transName; // 商品中文翻译名称
   final String? stocks;    // 各门店库存快照
+  final String? errorDetail; // 完整报错原文（列表只显示摘要，原文可点开复制）
 
   const OperationLog({
     required this.id,
@@ -23,6 +24,7 @@ class OperationLog {
     this.name,
     this.transName,
     this.stocks,
+    this.errorDetail,
   });
 
   Map<String, dynamic> toJson() => {
@@ -31,6 +33,7 @@ class OperationLog {
     if (name != null) 'name': name,
     if (transName != null) 'transName': transName,
     if (stocks != null) 'stocks': stocks,
+    if (errorDetail != null) 'errorDetail': errorDetail,
   };
 
   factory OperationLog.fromJson(Map<String, dynamic> json) => OperationLog(
@@ -43,6 +46,7 @@ class OperationLog {
     name: json['name'] as String?,
     transName: json['transName'] as String?,
     stocks: json['stocks'] as String?,
+    errorDetail: json['errorDetail'] as String?,
   );
 }
 
@@ -62,6 +66,7 @@ class OperationLogService {
     String? name,
     String? transName,
     String? stocks,
+    String? errorDetail,
   }) async {
     final id = DateTime.now().microsecondsSinceEpoch.toString();
     final now = DateTime.now();
@@ -77,7 +82,8 @@ class OperationLogService {
         detail: detail,
         name: name,
         transName: transName,
-        stocks: stocks);
+        stocks: stocks,
+        errorDetail: errorDetail);
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_key) ?? '[]';
     final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
@@ -119,27 +125,43 @@ class OperationLogService {
     await prefs.setString(_key, '[]');
   }
 
-  /// 收藏条码存储键（按条码收藏，置顶便于后续网页端核对问题条码）
-  static const _favKey = 'favorite_log_barcodes';
+  /// 收藏记录 id 存储键（只标记被点的那一条记录，不再按条码收藏）
+  static const _favIdKey = 'favorite_log_ids';
+  /// 旧版按条码收藏的键（首次读取时迁移成对应最新一条记录的 id）
+  static const _legacyFavBarcodeKey = 'favorite_log_barcodes';
 
-  /// 当前收藏的条码集合
-  static Future<Set<String>> getFavoriteBarcodes() async {
+  /// 当前收藏的记录 id 集合（会自动把旧的按条码收藏迁移成记录 id）
+  static Future<Set<String>> getFavoriteIds() async {
     final prefs = await SharedPreferences.getInstance();
-    return (prefs.getStringList(_favKey) ?? const []).toSet();
+    final ids = (prefs.getStringList(_favIdKey) ?? const []).toList();
+    if (ids.isNotEmpty) return ids.toSet();
+    final legacy = prefs.getStringList(_legacyFavBarcodeKey) ?? const [];
+    if (legacy.isEmpty) return <String>{};
+    final logs = await getAll();
+    for (final code in legacy) {
+      for (final log in logs) {
+        if (log.barcode == code && !ids.contains(log.id)) {
+          ids.add(log.id);
+          break;
+        }
+      }
+    }
+    await prefs.setStringList(_favIdKey, ids);
+    await prefs.remove(_legacyFavBarcodeKey);
+    return ids.toSet();
   }
 
-  /// 切换某条码的收藏状态，返回最新收藏集合
-  static Future<Set<String>> toggleFavoriteBarcode(String barcode) async {
-    final code = barcode.trim();
-    if (code.isEmpty) return <String>{};
+  /// 切换某一条记录的收藏状态，返回最新收藏集合
+  static Future<Set<String>> toggleFavoriteId(String id) async {
+    if (id.isEmpty) return <String>{};
     final prefs = await SharedPreferences.getInstance();
-    final list = (prefs.getStringList(_favKey) ?? const []).toList();
-    if (list.contains(code)) {
-      list.remove(code);
+    final list = (prefs.getStringList(_favIdKey) ?? const []).toList();
+    if (list.contains(id)) {
+      list.remove(id);
     } else {
-      list.insert(0, code);
+      list.insert(0, id);
     }
-    await prefs.setStringList(_favKey, list);
+    await prefs.setStringList(_favIdKey, list);
     return list.toSet();
   }
 }

@@ -319,7 +319,7 @@ class PhotoQueueService {
     switch (type) {
       case PhotoJobType.add:
       case PhotoJobType.restock:
-        return '更新照片';
+        return '更新图片';
       case PhotoJobType.sync:
         return '同步照片';
     }

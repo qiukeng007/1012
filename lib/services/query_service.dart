@@ -748,6 +748,228 @@ class QueryService {
   Future<String?> getCookie(String storeKey) =>
       _sessionManager.getCookie(storeKey);
 
+  /// 高级搜索里「图片」这一项的标签文字
+  static const String _imageFilterLabel = '商品图片';
+
+  /// 统计该门店「商品图片：已设置」的商品种数（首页右上角图片数量）。
+  ///
+  /// 对应银豹后台操作：门店切到该店 → 商品管理 → 高级搜索 →
+  /// 商品图片：已设置 → 底部“共 N 种商品”。
+  /// 高级搜索的统计接口是 POST /Product/LoadAddvancedProductSummary
+  /// （银豹自身拼写如此），返回 {successed:true,totalRecord:N}；
+  /// 旧版统计接口 /Product/LoadProductSummary 参数一致，前者不可用时回退。
+  ///
+  /// 「商品图片」筛选项在页面上是带 data-type 的选项列表，参数名会随银豹版本
+  /// 变化，所以这里从商品管理页 HTML 现场解析，不写死。
+  Future<ImageCountResult> fetchImageProductCount(StoreConfig store) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final diag = StringBuffer('门店：${store.name}');
+    try {
+      final cookie = await _sessionManager.getCookie(store.storeKey);
+      if (cookie == null || cookie.isEmpty) {
+        return const ImageCountResult(error: '未登录，请先在设置里登录这个门店');
+      }
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) {
+        return const ImageCountResult(error: '无法获取门店信息，请重新登录');
+      }
+      diag.write('，userId=$userId');
+
+      // 1. 取商品管理页 HTML，解析「商品图片」筛选项的参数名与取值
+      final pageUri = Uri.parse('$baseUrl/Product/Manage?userId=$userId');
+      final pageReq = await _httpClient.getUrl(pageUri);
+      pageReq.headers.set('User-Agent', _ua);
+      pageReq.headers.set('Accept', 'text/html,application/xhtml+xml');
+      pageReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      pageReq.headers.set('Cookie', cookie);
+      pageReq.followRedirects = false;
+      final pageResp =
+          await pageReq.close().timeout(const Duration(seconds: 20));
+      diag.write('\nGET $pageUri → HTTP ${pageResp.statusCode}');
+      final pageHtml = await _readBody(pageResp);
+      if (pageResp.statusCode == 301 || pageResp.statusCode == 302) {
+        return ImageCountResult(
+          error: '登录已过期，请重新登录该门店（HTTP ${pageResp.statusCode}）',
+          diagnostic: diag.toString(),
+        );
+      }
+
+      final filter = _parseImageFilterOption(pageHtml);
+      if (filter == null) {
+        return ImageCountResult(
+          error: '没能从商品管理页找到「商品图片」筛选项（页面可能已改版）',
+          diagnostic: '$diag\n${_imageLabelHint(pageHtml)}',
+        );
+      }
+      diag.write('\n筛选项：${filter.name}=${filter.value}');
+
+      // 2. 用高级搜索的统计接口取「共 N 种商品」
+      // 注意：不要把「商品状态/启用」当默认条件发出去。
+      // 银豹的高级搜索面板里，商品状态是单选项，用户没点选时请求里就
+      // 不带 enable 参数（见 _wpm.js buildBaseQueryCriterias / .cp-ul.singer）。
+      // 我们之前固定发 enable=1（在售），会把已停用但仍有图片的商品排除掉，
+      // 结果就比电脑端少（实测 8510 vs 8511）。所以这里跟电脑端保持一致：不发 enable。
+      final criteria = <String, String>{
+        'userId': userId,
+        'productTagUidsJson': '[]',
+        'keyword': '',
+        'groupBySpu': 'false',
+        'categorysJson': '[]',
+        'supplierUid': '',
+        'categoryType': '',
+        filter.name: filter.value,
+      };
+      for (final path in const [
+        '/Product/LoadAddvancedProductSummary',
+        '/Product/LoadProductSummary',
+      ]) {
+        final r = await _postProductSummary(
+            '$baseUrl$path', baseUrl, cookie, criteria);
+        diag.write('\nPOST $path → HTTP ${r.status}，totalRecord='
+            '${r.count ?? '—'}：${_brief(r.body)}');
+        if (r.count != null) {
+          return ImageCountResult(count: r.count, diagnostic: diag.toString());
+        }
+        if (r.status == 301 || r.status == 302) {
+          return ImageCountResult(
+            error: '登录已过期，请重新登录该门店（HTTP ${r.status}）',
+            diagnostic: diag.toString(),
+          );
+        }
+      }
+      return ImageCountResult(
+        error: '银豹没有返回统计数量',
+        diagnostic: diag.toString(),
+      );
+    } catch (e) {
+      return ImageCountResult(
+        error: '获取图片数量失败：${e.toString()}',
+        diagnostic: diag.toString(),
+      );
+    }
+  }
+
+  /// POST 商品统计接口，返回 (数量, HTTP 状态, 响应体)
+  Future<({int? count, int status, String body})> _postProductSummary(
+    String url,
+    String baseUrl,
+    String cookie,
+    Map<String, String> criteria,
+  ) async {
+    final req = await _httpClient.postUrl(Uri.parse(url));
+    req.headers.set('User-Agent', _ua);
+    req.headers.set('Accept', 'application/json, text/javascript, */*');
+    req.headers.set('Referer', '$baseUrl/Product/Manage');
+    req.headers.set('Origin', baseUrl);
+    req.headers.set('X-Requested-With', 'XMLHttpRequest');
+    req.headers.set('Content-Type',
+        'application/x-www-form-urlencoded; charset=UTF-8');
+    req.headers.set('Cookie', cookie);
+    req.followRedirects = false;
+    req.write(_encodeForm(criteria));
+    final resp = await req.close().timeout(const Duration(seconds: 20));
+    final body = await _readBody(resp);
+    return (count: _pickTotalRecord(body), status: resp.statusCode, body: body);
+  }
+
+  /// 从统计接口响应里取数量（{successed:true,totalRecord:N}）
+  static int? _pickTotalRecord(String body) {
+    try {
+      final data = jsonDecode(body);
+      if (data is! Map) return null;
+      final fromTop = _pickCount(data);
+      if (fromTop != null) return fromTop;
+      final result = data['result'];
+      if (result is Map) return _pickCount(result);
+    } catch (_) {}
+    return null;
+  }
+
+  static int? _pickCount(Map data) {
+    for (final key in const ['totalRecord', 'totalCount', 'total']) {
+      final v = data[key];
+      if (v is int) return v;
+      if (v is String) {
+        final n = int.tryParse(v.trim());
+        if (n != null) return n;
+      }
+    }
+    return null;
+  }
+
+  /// 从商品管理页 HTML 里解析「商品图片」筛选项：
+  /// 返回 (data-type 参数名, “已设置”对应的 data 取值)，找不到返回 null
+  ({String name, String value})? _parseImageFilterOption(String html) {
+    var from = 0;
+    while (true) {
+      final labelIdx = html.indexOf(_imageFilterLabel, from);
+      if (labelIdx < 0) return null;
+      from = labelIdx + _imageFilterLabel.length;
+      final found = _parseImageFilterAt(html, labelIdx);
+      if (found != null) return found;
+    }
+  }
+
+  ({String name, String value})? _parseImageFilterAt(String html, int labelIdx) {
+    const span = 3000;
+    final winStart = labelIdx - span < 0 ? 0 : labelIdx - span;
+    final winEnd = labelIdx + span > html.length ? html.length : labelIdx + span;
+    final window = html.substring(winStart, winEnd);
+    // 离标签最近的一个 data-type 就是「商品图片」这一组
+    final typeRe = RegExp(r'data-type="([A-Za-z0-9_]+)"');
+    String? name;
+    var typeIdx = -1;
+    var best = span * 2;
+    for (final m in typeRe.allMatches(window)) {
+      final abs = winStart + m.start;
+      final dist = (abs - labelIdx).abs();
+      if (dist < best) {
+        best = dist;
+        name = m.group(1);
+        typeIdx = abs;
+      }
+    }
+    if (name == null || typeIdx < 0) return null;
+
+    // 同一组里找文本为“已设置”的选项，取它的 data 取值
+    final segStart = typeIdx - 1200 < 0 ? 0 : typeIdx - 1200;
+    final segEnd = typeIdx + 4000 > html.length ? html.length : typeIdx + 4000;
+    final seg = html.substring(segStart, segEnd);
+    final liRe = RegExp(r'<li[^>]*data="([^"]*)"[^>]*>(.*?)</li>',
+        caseSensitive: false, dotAll: true);
+    for (final m in liRe.allMatches(seg)) {
+      final text = m.group(2)!.replaceAll(RegExp(r'<[^>]+>'), '').trim();
+      if (text.endsWith('已设置')) {
+        return (name: name, value: m.group(1)!);
+      }
+    }
+    // 兜底：取“已设置”文本前面最近的一个 data 取值
+    final setIdx = seg.indexOf('已设置');
+    if (setIdx > 0) {
+      final before = seg.substring(0, setIdx);
+      final dms = RegExp(r'data="([^"]*)"').allMatches(before).toList();
+      if (dms.isNotEmpty) return (name: name, value: dms.last.group(1)!);
+    }
+    return null;
+  }
+
+  /// 诊断用：截取「商品图片」标签附近的原文，便于定位页面结构变化
+  static String _imageLabelHint(String html) {
+    final i = html.indexOf(_imageFilterLabel);
+    if (i < 0) {
+      return '页面里没有「$_imageFilterLabel」这几个字（页面 ${html.length} 字符）';
+    }
+    final s = i - 500 < 0 ? 0 : i - 500;
+    final e = i + 500 > html.length ? html.length : i + 500;
+    return '「$_imageFilterLabel」附近原文：\n${html.substring(s, e)}';
+  }
+
+  /// 诊断用：响应体压成一行并截断
+  static String _brief(String s) {
+    final t = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return t.length <= 300 ? t : '${t.substring(0, 300)}…';
+  }
+
   /// 查询商品库存变动明细（银豹 /Inventory/LoadStockChangeHistory）
   /// 按门店查询：内部用总账号 storeId（或工号回退）定位门店，cookie 走本地会话
   Future<StockHistoryResult> fetchStockHistory(
@@ -1417,6 +1639,46 @@ class QueryService {
     }
   }
 
+  /// 解析供货商名对应的银豹供货商 uid（缓存优先，未命中实时拉取并重试 1 次）
+  Future<({String? uid, String? error})> _resolveSupplierUid(
+    StoreConfig store,
+    String baseUrl,
+    String cookie,
+    String userId,
+    String supplierName,
+  ) async {
+    final cachedUidMap = _supplierUidCache[store.storeKey] ??
+        await _loadSupplierUidCache(store.storeKey);
+    if (cachedUidMap.isNotEmpty) {
+      _supplierUidCache[store.storeKey] = cachedUidMap;
+      final hit = _matchSupplierUid(supplierName, cachedUidMap);
+      if (hit != null) return (uid: hit, error: null);
+    }
+    Map<String, String> uidMap = const {};
+    String errorDiag = '无法获取银豹供货商列表';
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final fetched = await _fetchSupplierUidMap(baseUrl, cookie, userId);
+      if (fetched.uidMap.isNotEmpty) {
+        uidMap = fetched.uidMap;
+        _supplierUidCache[store.storeKey] = uidMap;
+        await _saveSupplierUidCache(store.storeKey, uidMap);
+        break;
+      }
+      errorDiag = '无法获取银豹供货商列表（${fetched.error}）';
+    }
+    if (uidMap.isEmpty) return (uid: null, error: errorDiag);
+    final uid = _matchSupplierUid(supplierName, uidMap);
+    if (uid == null) {
+      final sample = uidMap.keys.take(8).join('、');
+      return (
+        uid: null,
+        error: '银豹供货商列表中未找到「$supplierName」'
+            '（当前共 ${uidMap.length} 个：$sample…）'
+      );
+    }
+    return (uid: uid, error: null);
+  }
+
   /// 修改商品供货商（与修改库存同一流程：搜索→FindProduct→改字段→SaveProduct）
   /// 新供货商设为商品默认供货商（替换原绑定列表）
   ///
@@ -1439,39 +1701,11 @@ class QueryService {
       final userId = await _resolveStoreUserId(store, cookie);
       if (userId == null) return '无法获取门店信息';
 
-      // 2. 获取供货商 uid 映射（缓存优先 → 未命中实时拉取并自动重试 1 次）
-      final cachedUidMap = _supplierUidCache[store.storeKey] ??
-          await _loadSupplierUidCache(store.storeKey);
-      if (cachedUidMap.isNotEmpty) {
-        _supplierUidCache[store.storeKey] = cachedUidMap;
-      }
-      String? newSupplierUid;
-      if (cachedUidMap.isNotEmpty) {
-        newSupplierUid = _matchSupplierUid(newSupplierName, cachedUidMap);
-      }
-      if (newSupplierUid == null) {
-        // 缓存未命中：实时拉取，失败自动重试 1 次
-        Map<String, String> uidMap = const {};
-        String errorDiag = '无法获取银豹供货商列表';
-        for (var attempt = 0; attempt < 2; attempt++) {
-          final fetched = await _fetchSupplierUidMap(baseUrl, cookie, userId);
-          if (fetched.uidMap.isNotEmpty) {
-            uidMap = fetched.uidMap;
-            _supplierUidCache[store.storeKey] = uidMap;
-            await _saveSupplierUidCache(store.storeKey, uidMap);
-            break;
-          }
-          errorDiag = '无法获取银豹供货商列表（${fetched.error}）';
-        }
-        if (uidMap.isEmpty) {
-          return errorDiag;
-        }
-        newSupplierUid = _matchSupplierUid(newSupplierName, uidMap);
-        if (newSupplierUid == null) {
-          final sample = uidMap.keys.take(8).join('、');
-          return '银豹供货商列表中未找到「$newSupplierName」（当前共 ${uidMap.length} 个：$sample…）';
-        }
-      }
+      // 2. 获取供货商 uid（缓存优先 → 未命中实时拉取并自动重试 1 次）
+      final uidRes = await _resolveSupplierUid(
+          store, baseUrl, cookie, userId, newSupplierName);
+      if (uidRes.error != null) return uidRes.error;
+      final newSupplierUid = uidRes.uid!;
 
       // 3. 搜索条码获取 productId
       final pageData = _encodeForm({
@@ -1765,8 +1999,964 @@ class QueryService {
       return '${store.name} 修改名称异常：${e.toString()}';
     }
   }
+  /// 修改商品价格（售价 sellPrice / 进价 buyPrice，传哪个改哪个）并同步到银豹该门店。
+  /// 流程与 updateProductName 一致：搜条码 → FindProduct → 改字段 → SaveProduct。
+  /// 返回 null 表示成功，否则返回错误信息。
+  Future<String?> updateProductPrice(
+    StoreConfig store,
+    String barcode, {
+    double? sellPrice,
+    double? buyPrice,
+    String? productUid,
+  }) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final code = barcode.trim();
+    if (code.isEmpty) return '条码为空';
+    if (sellPrice == null && buyPrice == null) return '没有要修改的价格';
+    for (final v in [sellPrice, buyPrice]) {
+      if (v == null) continue;
+      if (v.isNaN || v.isInfinite) return '价格格式不对';
+      if (v < 0) return '价格不能为负数';
+      if (v > 99999999.99) return '价格超出银豹允许的上限';
+    }
+    final sellText = sellPrice?.toStringAsFixed(2);
+    final buyText = buyPrice?.toStringAsFixed(2);
+
+    final cookie = await _sessionManager.getCookie(store.storeKey);
+    if (cookie == null || cookie.isEmpty) return '未登录';
+
+    try {
+      // 1. 获取 userId
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) return '无法获取门店信息';
+
+      // 2. 搜索条码获取 productId
+      final pageData = _encodeForm({
+        'userId': userId,
+        'enable': '1',
+        'productTagUidsJson': '[]',
+        'keyword': code,
+        'groupBySpu': 'false',
+        'categorysJson': '[]',
+        'supplierUid': '',
+        'categoryType': '',
+        'pageIndex': '1',
+        'pageSize': '20',
+        'orderColumn': '',
+        'asc': 'true',
+      });
+
+      final searchUri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
+      final searchReq = await _httpClient.postUrl(searchUri);
+      searchReq.headers.set('User-Agent', _ua);
+      searchReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      searchReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      searchReq.headers.set('Origin', baseUrl);
+      searchReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      searchReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      searchReq.headers.set('Cookie', cookie);
+      searchReq.followRedirects = false;
+      searchReq.write(pageData);
+      final searchResp =
+          await searchReq.close().timeout(const Duration(seconds: 15));
+      final searchBody = await _readBody(searchResp);
+
+      if (searchResp.statusCode != 200) {
+        return '搜索失败 (HTTP ${searchResp.statusCode})';
+      }
+
+      Map<String, dynamic> searchData;
+      try {
+        searchData = jsonDecode(searchBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '搜索返回格式异常';
+      }
+
+      final contentView = searchData['contentView'] as String? ?? '';
+      // 优先按商品 uid 精准定位（同一条码多个商品时更新用户选中的那一个）
+      String? productId;
+      if (productUid != null && productUid.isNotEmpty) {
+        final uidRowRegex = RegExp(
+            r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>');
+        for (final m in uidRowRegex.allMatches(contentView)) {
+          if (m.group(2) == productUid) {
+            productId = m.group(1);
+            break;
+          }
+        }
+      }
+      productId ??=
+          RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
+      if (productId == null) return '未找到该商品';
+
+      // 3. FindProduct 获取完整数据
+      final findUri = Uri.parse('$baseUrl/Product/FindProduct');
+      final findReq = await _httpClient.postUrl(findUri);
+      findReq.headers.set('User-Agent', _ua);
+      findReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      findReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      findReq.headers.set('Origin', baseUrl);
+      findReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      findReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      findReq.headers.set('Cookie', cookie);
+      findReq.followRedirects = false;
+      findReq.write('productId=$productId');
+      final findResp = await findReq.close().timeout(const Duration(seconds: 15));
+      final findBody = await _readBody(findResp);
+
+      if (findResp.statusCode != 200) {
+        return '获取商品数据失败 (HTTP ${findResp.statusCode})';
+      }
+
+      Map<String, dynamic> findData;
+      try {
+        findData = jsonDecode(findBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '商品数据解析失败';
+      }
+
+      final product = findData['product'] as Map<String, dynamic>?;
+      if (product == null) return '商品数据为空';
+
+      // 4. 修改价格字段
+      if (sellText != null) product['sellPrice'] = sellText;
+      if (buyText != null) product['buyPrice'] = buyText;
+
+      // 5. SaveProduct 保存
+      final productJson = jsonEncode(product);
+      final saveData = 'userId=$userId&productJson=${Uri.encodeComponent(productJson)}';
+
+      final saveUri = Uri.parse('$baseUrl/Product/SaveProduct');
+      final saveReq = await _httpClient.postUrl(saveUri);
+      saveReq.headers.set('User-Agent', _ua);
+      saveReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      saveReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      saveReq.headers.set('Origin', baseUrl);
+      saveReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      saveReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      saveReq.headers.set('Cookie', cookie);
+      saveReq.followRedirects = false;
+      saveReq.write(saveData);
+      final saveResp = await saveReq.close().timeout(const Duration(seconds: 15));
+      final saveBody = await _readBody(saveResp);
+
+      if (saveResp.statusCode != 200) {
+        return '保存失败 (HTTP ${saveResp.statusCode})';
+      }
+
+      try {
+        final saveResult = jsonDecode(saveBody) as Map<String, dynamic>;
+        if (saveResult['successed'] == true) {
+          return null; // 成功
+        }
+        return saveResult['msg'] as String? ?? '保存失败';
+      } catch (_) {
+        return '保存响应异常';
+      }
+    } catch (e) {
+      return '${store.name} 修改价格异常：${e.toString()}';
+    }
+  }
+
+  /// 总部模式专用：把改好的商品字段用官方「同步商品到门店」一次推给所有门店，
+  /// 比逐店 FindProduct+SaveProduct 快得多（和同步图片同一个接口）。
+  /// [apply] 在源店商品 JSON 上改字段；[attributes] 是要同步给目标门店的字段名
+  /// （如 sellPrice / buyPrice / productName / supplier，remarks=商品描述）。
+  /// 传入 note* 时可顺带把一条操作记录合并进商品描述并一起下发。
+  /// 返回 (全局错误, 逐店结果(store, error, 耗时ms))，error 为 null 表示成功。
+  Future<(String?, List<(StoreConfig store, String? error, int ms)>)>
+      syncProductFieldsToStores({
+    required StoreConfig source,
+    required List<StoreConfig> targets,
+    required String barcode,
+    required void Function(Map<String, dynamic> product) apply,
+    required List<String> attributes,
+    String? productUid,
+    String? noteOperatorName,
+    String? noteActionLabel,
+    String? noteMatchLabel,
+  }) async {
+    final code = barcode.trim();
+    if (code.isEmpty) {
+      return ('条码为空', const <(StoreConfig, String?, int)>[]);
+    }
+
+    // 1. 取源店商品 JSON
+    final (pErr, product) = await fetchProductForSync(
+      source,
+      code,
+      productUid: productUid,
+    );
+    if (pErr != null) return (pErr, const <(StoreConfig, String?, int)>[]);
+    if (product == null) {
+      return ('源商品数据为空', const <(StoreConfig, String?, int)>[]);
+    }
+
+    // 2. 改字段（可选：同时把操作记录合并进商品描述）并保存回源店
+    apply(product);
+    var noteWritten = false;
+    if (noteOperatorName != null &&
+        noteOperatorName.trim().isNotEmpty &&
+        noteActionLabel != null &&
+        noteActionLabel.isNotEmpty) {
+      product['description'] = mergeOperationNoteLine(
+        product['description'] as String?,
+        buildOperationNote(noteOperatorName, noteActionLabel),
+        noteMatchLabel ?? noteActionLabel,
+      );
+      noteWritten = true;
+    }
+    final saveErr = await _saveProductRaw(source, product);
+    if (saveErr != null) return (saveErr, const <(StoreConfig, String?, int)>[]);
+
+    // 3. 官方同步指定字段（含商品描述 remarks）到其余门店
+    final attrs = <String>[
+      ...attributes,
+      if (noteWritten) 'remarks',
+    ];
+    return syncProductToStores(
+      source: source,
+      targets: targets,
+      barcode: code,
+      productUid: productUid,
+      product: product,
+      attributes: attrs,
+    );
+  }
+
+  /// 总部模式改价：价格字段（+可选操作记录）一次同步到所有门店
+  Future<(String?, List<(StoreConfig store, String? error, int ms)>)>
+      syncProductPriceToStores({
+    required StoreConfig source,
+    required List<StoreConfig> targets,
+    required String barcode,
+    double? sellPrice,
+    double? buyPrice,
+    String? productUid,
+    String? noteOperatorName,
+    String? noteActionLabel,
+    String? noteMatchLabel,
+  }) async {
+    if (sellPrice == null && buyPrice == null) {
+      return ('没有要修改的价格', const <(StoreConfig, String?, int)>[]);
+    }
+    for (final v in [sellPrice, buyPrice]) {
+      if (v == null) continue;
+      if (v.isNaN || v.isInfinite) {
+        return ('价格格式不对', const <(StoreConfig, String?, int)>[]);
+      }
+      if (v < 0) {
+        return ('价格不能为负数', const <(StoreConfig, String?, int)>[]);
+      }
+      if (v > 99999999.99) {
+        return ('价格超出银豹允许的上限', const <(StoreConfig, String?, int)>[]);
+      }
+    }
+    return syncProductFieldsToStores(
+      source: source,
+      targets: targets,
+      barcode: barcode,
+      productUid: productUid,
+      attributes: [
+        if (sellPrice != null) 'sellPrice',
+        if (buyPrice != null) 'buyPrice',
+      ],
+      apply: (product) {
+        if (sellPrice != null) {
+          product['sellPrice'] = sellPrice.toStringAsFixed(2);
+        }
+        if (buyPrice != null) {
+          product['buyPrice'] = buyPrice.toStringAsFixed(2);
+        }
+      },
+      noteOperatorName: noteOperatorName,
+      noteActionLabel: noteActionLabel,
+      noteMatchLabel: noteMatchLabel,
+    );
+  }
+
+  /// 总部模式改商品名称：一次同步到所有门店
+  Future<(String?, List<(StoreConfig store, String? error, int ms)>)>
+      syncProductNameToStores({
+    required StoreConfig source,
+    required List<StoreConfig> targets,
+    required String barcode,
+    required String newName,
+    String? productUid,
+    String? noteOperatorName,
+    String? noteActionLabel,
+    String? noteMatchLabel,
+  }) async {
+    final name = newName.trim();
+    if (name.isEmpty) {
+      return ('商品名称不能为空', const <(StoreConfig, String?, int)>[]);
+    }
+    return syncProductFieldsToStores(
+      source: source,
+      targets: targets,
+      barcode: barcode,
+      productUid: productUid,
+      attributes: const ['productName'],
+      apply: (product) {
+        product['name'] = name;
+        if (product.containsKey('productName')) product['productName'] = name;
+      },
+      noteOperatorName: noteOperatorName,
+      noteActionLabel: noteActionLabel,
+      noteMatchLabel: noteMatchLabel,
+    );
+  }
+
+  /// 总部模式改供货商：解析供货商 uid 后一次同步到所有门店
+  Future<(String?, List<(StoreConfig store, String? error, int ms)>)>
+      syncProductSupplierToStores({
+    required StoreConfig source,
+    required List<StoreConfig> targets,
+    required String barcode,
+    required String newSupplierName,
+    String? productUid,
+    String? noteOperatorName,
+    String? noteActionLabel,
+    String? noteMatchLabel,
+  }) async {
+    final baseUrl = source.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final cookie = await _sessionManager.getCookie(source.storeKey);
+    if (cookie == null || cookie.isEmpty) {
+      return ('未登录', const <(StoreConfig, String?, int)>[]);
+    }
+    final userId = await _resolveStoreUserId(source, cookie);
+    if (userId == null) {
+      return ('无法获取门店信息', const <(StoreConfig, String?, int)>[]);
+    }
+    final uidRes =
+        await _resolveSupplierUid(source, baseUrl, cookie, userId, newSupplierName);
+    if (uidRes.error != null) {
+      return (uidRes.error, const <(StoreConfig, String?, int)>[]);
+    }
+    final supplierUid = uidRes.uid!;
+    return syncProductFieldsToStores(
+      source: source,
+      targets: targets,
+      barcode: barcode,
+      productUid: productUid,
+      attributes: const ['supplier'],
+      apply: (product) {
+        product['supplierUid'] = supplierUid;
+        product['supplierName'] = newSupplierName;
+        product['supplierRangeList'] = [
+          {
+            'supplierUid': supplierUid,
+            'supplierName': newSupplierName,
+            'isDefault': '1',
+          },
+        ];
+      },
+      noteOperatorName: noteOperatorName,
+      noteActionLabel: noteActionLabel,
+      noteMatchLabel: noteMatchLabel,
+    );
+  }
+
+  /// 读取门店的「商品单位」列表（/Product/LoadStoreProductUnits）
+  /// 网页用 GET，部分门店/网关只认 POST，两种都试一遍
+  /// 返回 (units, error, debug)：units 非空即成功，debug 是原始行（诊断用）
+  Future<({List<(String id, String name)> units, String? error, String debug})>
+      fetchStoreUnits(StoreConfig store) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final cookie = await _sessionManager.getCookie(store.storeKey);
+    if (cookie == null || cookie.isEmpty) {
+      return (units: const <(String, String)>[], error: '未登录', debug: '');
+    }
+    try {
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) {
+        return (
+          units: const <(String, String)>[],
+          error: '无法获取门店信息',
+          debug: ''
+        );
+      }
+      String lastErr = '';
+      String lastDebug = '';
+      for (final useGet in const [true, false]) {
+        final res =
+            await _loadUnitsOnce(baseUrl, cookie, userId, useGet: useGet);
+        if (res.units.isNotEmpty) {
+          return (units: res.units, error: null, debug: res.debug);
+        }
+        lastErr = res.error ?? '未知原因';
+        lastDebug = res.debug;
+      }
+      return (
+        units: const <(String, String)>[],
+        error: '读取单位列表失败：$lastErr',
+        debug: lastDebug
+      );
+    } catch (e) {
+      return (
+        units: const <(String, String)>[],
+        error: '获取单位列表异常：$e',
+        debug: ''
+      );
+    }
+  }
+
+  /// 单位行里真正用于商品的编号：商品里存的是行里的 txtUid（不是内部行号 id），
+  /// 老版本/异常返回时依次退回 uid、id
+  static String _unitRowId(Map<dynamic, dynamic> row) {
+    for (final key in const ['txtUid', 'uid', 'id']) {
+      final v = (row[key] ?? '').toString().trim();
+      if (v.isNotEmpty) return v;
+    }
+    return '';
+  }
+
+  /// 单位行原文（只留跟编号/名称有关的键，诊断用，最多 [maxRows] 行）
+  static String _unitRowDebug(List<dynamic> raw, int maxRows) {
+    final rows = <String>[];
+    for (final e in raw) {
+      if (rows.length >= maxRows) break;
+      if (e is! Map) continue;
+      final picked = <String, dynamic>{};
+      for (final k in e.keys) {
+        final lk = k.toString().toLowerCase();
+        if (lk == 'id' || lk.contains('name') || lk.contains('unit')) {
+          picked[k.toString()] = e[k];
+        }
+      }
+      picked['_used'] = _unitRowId(e);
+      rows.add(jsonEncode(picked));
+    }
+    return rows.join('\n');
+  }
+
+  /// 单次请求银豹单位列表：[useGet] true 走 GET 查询串，false 走 POST 表单
+  Future<
+      ({
+        List<(String id, String name)> units,
+        String? error,
+        String debug
+      })> _loadUnitsOnce(
+    String baseUrl,
+    String cookie,
+    String userId, {
+    required bool useGet,
+  }) async {
+    final method = useGet ? 'GET' : 'POST';
+    try {
+      final uri = Uri.parse(useGet
+          ? '$baseUrl/Product/LoadStoreProductUnits'
+              '?userId=${Uri.encodeComponent(userId)}'
+          : '$baseUrl/Product/LoadStoreProductUnits');
+      final req = useGet
+          ? await _httpClient.getUrl(uri)
+          : await _httpClient.postUrl(uri);
+      req.headers.set('User-Agent', _ua);
+      req.headers.set('Accept', 'application/json, text/javascript, */*');
+      req.headers.set('Referer', '$baseUrl/Product/Manage');
+      req.headers.set('Origin', baseUrl);
+      req.headers.set('X-Requested-With', 'XMLHttpRequest');
+      if (!useGet) {
+        req.headers.set('Content-Type',
+            'application/x-www-form-urlencoded; charset=UTF-8');
+      }
+      req.headers.set('Cookie', cookie);
+      req.followRedirects = false;
+      if (!useGet) req.write(_encodeForm({'userId': userId}));
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      final body = await _readBody(resp);
+      if (resp.statusCode != 200) {
+        return (
+          units: const <(String, String)>[],
+          error: '$method HTTP ${resp.statusCode}',
+          debug: ''
+        );
+      }
+      final data = jsonDecode(body) as Map<String, dynamic>;
+      final raw = data['productunits'];
+      final units = <(String, String)>[];
+      var debug = '';
+      if (raw is List) {
+        debug = _unitRowDebug(raw, 8);
+        for (final e in raw) {
+          if (e is! Map) continue;
+          final id = _unitRowId(e);
+          final name = (e['name'] ?? '').toString().trim();
+          if (name.isEmpty || id.isEmpty) continue;
+          units.add((id, name));
+        }
+      }
+      if (units.isEmpty) {
+        return (
+          units: units,
+          error: '$method 返回里没有单位，'
+              '请先在银豹后台「商品单位」给该门店新增单位',
+          debug: debug
+        );
+      }
+      return (units: units, error: null, debug: debug);
+    } catch (e) {
+      return (
+        units: const <(String, String)>[],
+        error: '$method 请求异常：$e',
+        debug: ''
+      );
+    }
+  }
+  /// 单位名 → 单位 uid（按门店单位列表匹配，精确优先，忽略大小写兜底）
+  Future<({String? uid, String? name, String? error})> resolveUnit(
+    StoreConfig store,
+    String unitName,
+  ) async {
+    final name = unitName.trim();
+    if (name.isEmpty) return (uid: null, name: null, error: '单位不能为空');
+    final res = await fetchStoreUnits(store);
+    if (res.units.isEmpty) {
+      return (uid: null, name: null, error: res.error ?? '无法获取单位列表');
+    }
+    for (final u in res.units) {
+      if (u.$2 == name) return (uid: u.$1, name: u.$2, error: null);
+    }
+    final lower = name.toLowerCase();
+    for (final u in res.units) {
+      if (u.$2.toLowerCase() == lower) {
+        return (uid: u.$1, name: u.$2, error: null);
+      }
+    }
+    final sample = res.units.take(10).map((u) => u.$2).join('、');
+    return (
+      uid: null,
+      name: null,
+      error: '该门店单位列表里没有「$name」'
+          '（现有 ${res.units.length} 个：$sample…），请先在银豹后台新增该单位'
+    );
+  }
+
+  /// 判断单位换算表里的某一条是不是「主单位」
+  /// 银豹不同门店可能写 isBase=1 / "1" / true / "true"，也可能整表缺这个标记
+  static bool isBaseUnitEntry(Object? entry) {
+    if (entry is! Map) return false;
+    final v = entry['isBase'];
+    if (v == null) return false;
+    final s = v.toString().trim().toLowerCase();
+    return s == '1' || s == 'true';
+  }
+
+  /// 读取商品 JSON 里的主单位名（FindProduct 数据）
+  static String readProductUnitName(Map<String, dynamic> product) {
+    for (final key in const ['baseUnitName', 'unitName', 'productUnitName']) {
+      final v = (product[key] ?? '').toString().trim();
+      if (v.isNotEmpty) return v;
+    }
+    final raw = product['productUnitExchangeList'];
+    if (raw is List) {
+      for (final e in raw) {
+        if (isBaseUnitEntry(e) && e is Map) {
+          final v = (e['productUnitName'] ?? '').toString().trim();
+          if (v.isNotEmpty) return v;
+        }
+      }
+    }
+    return '';
+  }
+
+  /// 读取商品 JSON 里主单位的 uid（读不到返回空串：说明这份 JSON 没带单位字段）
+  static String readProductUnitUid(Map<String, dynamic> product) {
+    for (final key in const ['baseUnitUid', 'unitUid', 'unit']) {
+      final v = (product[key] ?? '').toString().trim();
+      if (v.isNotEmpty) return v;
+    }
+    final raw = product['productUnitExchangeList'];
+    if (raw is List) {
+      for (final e in raw) {
+        if (isBaseUnitEntry(e) && e is Map) {
+          for (final key in const ['productUnitUid', 'productUnitTxtUid']) {
+            final v = (e[key] ?? '').toString().trim();
+            if (v.isNotEmpty) return v;
+          }
+        }
+      }
+    }
+    return '';
+  }
+
+  /// 单位相关字段原文（诊断用：单位改不动时把这段复制出来看银豹的字段名）
+  static String unitDebugJson(Map<String, dynamic> product) {
+    final buf = StringBuffer();
+    buf.writeln('商品字段名: ${product.keys.join(', ')}');
+    final unitFields = <String, dynamic>{};
+    for (final e in product.entries) {
+      if (e.key == 'productUnitExchangeList') continue;
+      if (e.key.toLowerCase().contains('unit')) {
+        unitFields[e.key] = e.value;
+      }
+    }
+    buf.writeln('单位相关字段: ${jsonEncode(unitFields)}');
+    final raw = product['productUnitExchangeList'];
+    buf.writeln('productUnitExchangeList: '
+        '${raw == null ? '（无此字段）' : jsonEncode(raw)}');
+    return buf.toString();
+  }
+
+  /// 回读校验：保存后再读一次商品，确认主单位真的变成了目标单位。
+  /// 返回 null 表示确认成功，否则返回可复制的诊断文本。
+  Future<String?> verifyProductUnit(
+    StoreConfig store,
+    String barcode, {
+    required String wantUid,
+    required String wantName,
+    String beforeDebug = '',
+    String? productUid,
+  }) async {
+    final (vErr, verify) =
+        await fetchProductForSync(store, barcode, productUid: productUid);
+    if (vErr != null || verify == null) {
+      return '回读校验没拿到商品数据（${vErr ?? '未知原因'}）';
+    }
+    final afterUid = readProductUnitUid(verify);
+    final afterName = readProductUnitName(verify);
+    // 银豹不同门店 JSON 里单位既可能是编号也可能是名称，两种都算改成功
+    final jsonOk = (afterUid.isNotEmpty &&
+            (afterUid == wantUid || afterUid == wantName)) ||
+        (afterName.isNotEmpty && afterName == wantName);
+    if (jsonOk) {
+      // 商品 JSON 变了不代表后台/收银看见的就是新单位，再用商品列表确认一次
+      String listUnit = '';
+      try {
+        final res = await queryByBarcode(store, barcode);
+        listUnit = res.data?.unit ?? '';
+      } catch (_) {
+        // 列表校验失败不影响判断
+      }
+      if (listUnit.isNotEmpty && listUnit != '—' && listUnit != wantName) {
+        final unitRows = await fetchStoreUnits(store);
+        return '保存接口返回成功，但银豹商品列表里显示的还是「$listUnit」'
+            '（单位没真正改过去）\n'
+            '目标单位：$wantName（本次写入的单位编号=$wantUid）\n'
+            '商品列表里的单位显示：$listUnit\n'
+            '${unitRows.debug.isEmpty ? '' : '该门店单位列表原始行：\n${unitRows.debug}\n'}\n'
+            '${beforeDebug.isEmpty ? '' : '【修改前】\n$beforeDebug\n'}'
+            '【保存后商品JSON】\n${unitDebugJson(verify)}';
+      }
+      return null;
+    }
+    final unitRows = await fetchStoreUnits(store);
+    return '目标单位：$wantName（本次写入的单位编号=$wantUid）\n'
+        '保存后回读：${afterName.isEmpty ? '（读不到单位名）' : afterName}'
+        '${afterUid.isEmpty ? '' : '（单位编号=$afterUid）'}\n'
+        '${unitRows.debug.isEmpty ? '' : '该门店单位列表原始行：\n${unitRows.debug}\n'}\n'
+        '${beforeDebug.isEmpty ? '' : '【修改前】\n$beforeDebug\n'}'
+        '【保存后】\n${unitDebugJson(verify)}';
+  }
+  /// 单位字段诊断文本：门店单位列表 + 商品里的单位字段原文 + 列表显示的单位
+  /// 供用户一键复制发给管理员排查
+  Future<String> buildUnitDiagnostic(
+    StoreConfig store,
+    String barcode, {
+    String? productUid,
+  }) async {
+    final buf = StringBuffer();
+    buf.writeln('门店：${store.name}');
+    buf.writeln('条码：$barcode');
+    buf.writeln();
+    final unitList = await fetchStoreUnits(store);
+    if (unitList.units.isEmpty) {
+      buf.writeln('门店单位列表：读取失败（${unitList.error ?? '空'}）');
+    } else {
+      buf.writeln('门店单位列表（${unitList.units.length} 个，ID=名称）：');
+      buf.writeln(unitList.units.map((u) => '${u.$1}=${u.$2}').join('，'));
+      if (unitList.debug.isNotEmpty) {
+        buf.writeln('单位原始行（核对编号字段，_used 是本次会用到的编号）：');
+        buf.writeln(unitList.debug);
+      }
+    }
+    buf.writeln();
+    final (err, product) =
+        await fetchProductForSync(store, barcode, productUid: productUid);
+    if (err != null || product == null) {
+      buf.writeln('商品数据读取失败：${err ?? '无数据'}');
+      return buf.toString();
+    }
+    buf.writeln('【商品 JSON 单位字段】');
+    buf.write(unitDebugJson(product));
+    try {
+      final res = await queryByBarcode(store, barcode);
+      buf.writeln();
+      buf.writeln('商品列表里显示的单位：${res.data?.unit ?? '（查不到）'}');
+    } catch (_) {
+      // 忽略
+    }
+    return buf.toString();
+  }
+
+  /// 把主单位写进商品 JSON。
+  /// 银豹保存时：顶层 baseUnitName 写「单位名称」，
+  /// 商品引用的单位编号写进 productUnitExchangeList（productUnitUid/productUnitTxtUid + isBase=1）。
+  static void applyBaseUnit(
+    Map<String, dynamic> product,
+    String unitUid,
+    String unitName,
+  ) {
+    product['baseUnitName'] = unitName;
+    for (final key in const ['baseUnitUid', 'unitUid']) {
+      if (product.containsKey(key)) product[key] = unitUid;
+    }
+    for (final key in const ['unitName', 'productUnitName']) {
+      if (product.containsKey(key)) product[key] = unitName;
+    }
+    if (product.containsKey('unit')) {
+      // 这份 JSON 里的 unit 字段原本存的是名称还是编号，按原样跟写
+      final oldUnitRaw = (product['unit'] ?? '').toString().trim();
+      final oldName = readProductUnitName(product);
+      product['unit'] = (oldUnitRaw.isNotEmpty && oldUnitRaw == oldName)
+          ? unitName
+          : unitUid;
+    }
+    final raw = product['productUnitExchangeList'];
+    final list = raw is List ? List<dynamic>.of(raw) : <dynamic>[];
+    var target = -1;
+    for (var i = 0; i < list.length; i++) {
+      if (isBaseUnitEntry(list[i])) {
+        target = i;
+        break;
+      }
+    }
+    // 整表都没标主单位时，退回改第一条（银豹的主单位通常在第一条）
+    if (target < 0 && list.isNotEmpty) target = 0;
+    if (target >= 0 && list[target] is Map) {
+      final m = Map<String, dynamic>.from(list[target] as Map);
+      m['productUnitUid'] = unitUid;
+      m['productUnitTxtUid'] = unitUid;
+      m['productUnitName'] = unitName;
+      m['isBase'] = 1;
+      list[target] = m;
+    } else {
+      list.insert(0, <String, dynamic>{
+        'productUnitUid': unitUid,
+        'productUnitTxtUid': unitUid,
+        'unitQuantity': 1,
+        'baseUnitQuantity': 1,
+        'isBase': 1,
+        'isRequest': 0,
+        'isTicket': -1,
+        'isDiscard': -1,
+        'productUnitName': unitName,
+      });
+    }
+    product['productUnitExchangeList'] = list;
+  }
+  /// 修改商品主单位（仅该门店）：搜条码 → FindProduct → 改单位 → SaveProduct
+  /// [unitUid] 已知该门店单位 uid 时传入，省一次单位列表请求；不传则按名称现查
+  /// 返回 null 表示成功，否则返回错误信息。
+  Future<String?> updateProductUnit(
+    StoreConfig store,
+    String barcode, {
+    required String unitName,
+    String? unitUid,
+    String? productUid,
+  }) async {
+    final code = barcode.trim();
+    if (code.isEmpty) return '条码为空';
+    String uid;
+    String name;
+    if (unitUid != null && unitUid.isNotEmpty) {
+      uid = unitUid;
+      name = unitName.trim();
+    } else {
+      final unitRes = await resolveUnit(store, unitName);
+      if (unitRes.error != null) return unitRes.error;
+      uid = unitRes.uid!;
+      name = unitRes.name!;
+    }
+    final (pErr, product) =
+        await fetchProductForSync(store, code, productUid: productUid);
+    if (pErr != null) return pErr;
+    if (product == null) return '未找到该商品';
+    final beforeDebug = unitDebugJson(product);
+    applyBaseUnit(product, uid, name);
+    final saveErr = await _saveProductRaw(store, product);
+    if (saveErr != null) return saveErr;
+    // 回读校验：银豹对不认识的字段是静默忽略，这里确认单位真的改过去了
+    final vMsg = await verifyProductUnit(
+      store,
+      code,
+      wantUid: uid,
+      wantName: name,
+      beforeDebug: beforeDebug,
+      productUid: productUid,
+    );
+    if (vMsg != null) {
+      return '单位没能改成功（保存接口返回成功，但回读不一致）\n$vMsg';
+    }
+    return null;
+  }
+
+  /// 只看银豹商品列表里的「主单位」列，判断单位有没有真的改过去。
+  /// true=已生效；false=没生效（列表里空着或还是别的单位）；null=列表没查到（无法判断）
+  Future<bool?> isUnitAppliedOnList(
+    StoreConfig store,
+    String barcode,
+    String wantName,
+  ) async {
+    final want = wantName.trim();
+    if (want.isEmpty) return null;
+    try {
+      final res = await queryByBarcode(store, barcode);
+      final shown = (res.data?.unit ?? '').trim();
+      if (shown.isEmpty || shown == '—') return false;
+      return shown == want;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 总部模式改单位：只改一个门店（源店），再用官方「同步商品到门店」一键推给其他门店。
+  /// 1) 源店：改单位 + 把操作记录写进商品描述（syncProductFieldsToStores 内部完成）
+  /// 2) 官方同步：一次请求把商品单位换算表推给其他门店（很快）
+  /// 3) 逐店回读：哪家没同步过去，就用该店自己的单位编号补写一次（各门店单位编号不同）
+  /// 返回 repaired = 需要单独补写的门店（它的商品描述也要再写一次）。
+  Future<
+      ({
+        String? globalErr,
+        bool officialSync,
+        List<(StoreConfig store, String? error, int ms)> results,
+        List<StoreConfig> repaired,
+      })> syncProductUnitToStores({
+    required StoreConfig source,
+    required List<StoreConfig> targets,
+    required String barcode,
+    required String unitName,
+    String? productUid,
+    String? noteOperatorName,
+    String? noteActionLabel,
+    String? noteMatchLabel,
+  }) async {
+    final srcUnit = await resolveUnit(source, unitName);
+    if (srcUnit.error != null) {
+      return (
+        globalErr: '${source.name}：${srcUnit.error}',
+        officialSync: false,
+        results: const <(StoreConfig, String?, int)>[],
+        repaired: const <StoreConfig>[],
+      );
+    }
+    final wantName = srcUnit.name!;
+    // 1+2：改源店（含写商品描述）+ 官方同步其他门店
+    final (gErr, syncResults) = await syncProductFieldsToStores(
+      source: source,
+      targets: targets,
+      barcode: barcode,
+      productUid: productUid,
+      attributes: const ['productUnitExchange'],
+      apply: (product) => applyBaseUnit(product, srcUnit.uid!, wantName),
+      noteOperatorName: noteOperatorName,
+      noteActionLabel: noteActionLabel,
+      noteMatchLabel: noteMatchLabel,
+    );
+    if (gErr != null) {
+      return (
+        globalErr: gErr,
+        officialSync: true,
+        results: syncResults,
+        repaired: const <StoreConfig>[],
+      );
+    }
+    String? syncErrOf(StoreConfig s) {
+      for (final r in syncResults) {
+        if (r.$1.storeKey == s.storeKey) return r.$2;
+      }
+      return null;
+    }
+
+    // 3：并发回读各家（源店也要确认），没生效的记下来单独补写
+    final pending = <(StoreConfig, int)>[
+      (source, 0),
+      for (final r in syncResults) (r.$1, r.$3),
+    ];
+    final checks = await Future.wait(pending.map((p) async {
+      final syncErr = syncErrOf(p.$1);
+      if (syncErr != null) return (p.$1, syncErr, p.$2, false);
+      final applied = await isUnitAppliedOnList(p.$1, barcode, wantName);
+      // applied 为 null 表示没查到列表，按成功处理，不做多余写操作
+      return (p.$1, null, p.$2, applied == false);
+    }));
+    final results = <(StoreConfig, String?, int)>[];
+    final repaired = <StoreConfig>[];
+    for (final c in checks) {
+      if (!c.$4) {
+        results.add((c.$1, c.$2, c.$3));
+        continue;
+      }
+      // 该门店单位编号与源店不同 → 用该店自己的编号单独改一次
+      final u = await resolveUnit(c.$1, unitName);
+      if (u.uid == null) {
+        results.add((
+          c.$1,
+          u.error ?? '该门店单位列表里没有「$unitName」',
+          c.$3
+        ));
+        continue;
+      }
+      final sw = Stopwatch()..start();
+      final err2 = await updateProductUnit(
+        c.$1,
+        barcode,
+        unitName: u.name!,
+        unitUid: u.uid,
+        productUid: productUid,
+      );
+      results.add((c.$1, err2, c.$3 + sw.elapsedMilliseconds));
+      if (err2 == null) repaired.add(c.$1);
+    }
+    return (
+      globalErr: null,
+      officialSync: true,
+      results: results,
+      repaired: repaired,
+    );
+  }
+  /// 生成一行操作记录文本：`2026.09.11 张三：更新商品售价 R35.00`
+  static String buildOperationNote(String operatorName, String actionLabel) {
+    final now = DateTime.now();
+    final dateStr = '${now.year}.'
+        '${now.month.toString().padLeft(2, '0')}.'
+        '${now.day.toString().padLeft(2, '0')}';
+    return '$dateStr $operatorName：$actionLabel';
+  }
+
+  /// 把一行操作记录合并进商品描述：同类型行替换，其它行原样保留。
+  /// [matchKey] 用于定位要替换的那一行（例如「更新商品售价」）。
+  static String mergeOperationNoteLine(
+    String? description,
+    String newLine,
+    String matchKey,
+  ) {
+    final lines = (description ?? '')
+        .split('\n')
+        .map((l) => l.trimRight())
+        .toList();
+    // 兼容改名前的历史写法：命中任一写法即替换，避免同一类型堆成多行
+    const legacyAliases = <String, List<String>>{
+      '更新库存': ['修改商品库存', '编辑库存'],
+      '更新售价': ['更新商品售价'],
+      '更新进价': ['更新商品进价'],
+      '更新图片': ['更新照片'],
+    };
+    final keys = <String>[matchKey, ...?legacyAliases[matchKey]];
+    final idx = lines.indexWhere((l) => keys.any(l.contains));
+    if (idx >= 0) {
+      lines[idx] = newLine;
+    } else {
+      lines.add(newLine);
+    }
+    return lines.where((l) => l.trim().isNotEmpty).join('\n');
+  }
+
   /// 更新商品操作记录，统一写入商品描述（description）：
-  /// 更新照片 / 更新库存 / 更新供货商 三行，各类型更新时只替换对应行，保持三行。
+  /// 更新图片 / 更新库存 / 更新供货商 三行，各类型更新时只替换对应行，保持三行。
   /// 返回 null 表示成功，否则返回错误信息。
   Future<String?> updateProductOperationNote(
     StoreConfig store,
@@ -1774,6 +2964,7 @@ class QueryService {
     String operatorName,
     String actionLabel, {
     String? productUid,
+    String? matchLabel,
   }) async {
     final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
     final code = barcode.trim();
@@ -1878,26 +3069,12 @@ class QueryService {
 
       // 4. 合并记录：统一写入商品描述，同类型记录替换一行，无则追加，保持三行
       const fieldName = 'description';
-      final now = DateTime.now();
-      final dateStr =
-          '${now.year}.${now.month.toString().padLeft(2, '0')}.${now.day.toString().padLeft(2, '0')}';
-      final newLine = '$dateStr $operatorName：$actionLabel';
-      final lines = ((product[fieldName] as String?) ?? '')
-          .split('\n')
-          .map((l) => l.trimRight())
-          .toList();
-      // 库存兼容旧行「修改商品库存」：任一写法命中都替换为「更新库存」
-      final idx = actionLabel == '更新库存'
-          ? lines.indexWhere(
-              (l) => l.contains('更新库存') || l.contains('修改商品库存'))
-          : lines.indexWhere((l) => l.contains(actionLabel));
-      if (idx >= 0) {
-        lines[idx] = newLine;
-      } else {
-        lines.add(newLine);
-      }
-      product[fieldName] =
-          lines.where((l) => l.trim().isNotEmpty).join('\n');
+      final newLine = buildOperationNote(operatorName, actionLabel);
+      product[fieldName] = mergeOperationNoteLine(
+        product[fieldName] as String?,
+        newLine,
+        matchLabel ?? actionLabel,
+      );
 
       // 5. SaveProduct 保存
       final productJson = jsonEncode(product);
