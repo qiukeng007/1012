@@ -454,7 +454,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
         if (supplierChanged) {
           supplierErr = await _syncSupplierToPospal(currentSupplier);
           syncMsgs.add((supplierErr == null || supplierErr.isEmpty)
-              ? '供货商已同步到银豹'
+              ? '供货商已同步'
               : '供货商同步失败：$supplierErr');
         }
         if (imageChanged) {
@@ -473,7 +473,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
               writeDesc: true,
               stores: stores,
             );
-            syncMsgs.add('照片已入后台队列');
+            syncMsgs.add('照片已加入队列，自动同步${stores.length}个门店');
           } catch (e) {
             syncMsgs.add('照片入队失败：$e');
           }

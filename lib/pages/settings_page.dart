@@ -21,6 +21,8 @@ import '../services/mode_service.dart';
 import '../widgets/config_form.dart';
 import '../widgets/login_button.dart';
 import 'mode_select_page.dart';
+import 'advanced_settings_page.dart';
+import '../services/advanced_settings_service.dart';
 import 'server_txt_manager_page.dart';
 import 'wechat_login_page.dart';
 import '../services/store_sync_service.dart';
@@ -949,6 +951,11 @@ class _SettingsPageState extends State<SettingsPage> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: _buildModeResetCard(),
+        ),
+        // 高级设置按钮（验证密码与启动验证一致；远程改 password.txt 后自动同步）
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: _buildAdvancedSettingsButton(),
         ),
         // 7. 版本号
         Padding(
@@ -2717,6 +2724,111 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         ),
       ),
+    );
+  }
+
+  /// 高级设置按钮（放在配置页底部）
+  Widget _buildAdvancedSettingsButton() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: SizedBox(
+        width: double.infinity,
+        child: OutlinedButton.icon(
+          onPressed: _openAdvancedSettings,
+          icon: const Icon(Icons.tune, size: 18),
+          label: const Text('高级设置'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: AppConstants.primaryColor,
+            side: const BorderSide(color: AppConstants.primaryColor),
+            padding: const EdgeInsets.symmetric(vertical: 12),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 高级设置入口：密码与启动验证同一来源（远程 password.txt，
+  /// 连不上服务器时用默认密码），验证通过后进入高级设置页。
+  Future<void> _openAdvancedSettings() async {
+    final serverUrl = _restockConfig.serverUrl.trim();
+    String remotePwd = '';
+    if (serverUrl.isNotEmpty) {
+      try {
+        final auth = AuthService(await SharedPreferences.getInstance());
+        remotePwd = await auth.fetchRemotePassword(serverUrl);
+      } catch (_) {}
+    }
+    final useFallback = remotePwd.isEmpty;
+    final effectivePwd =
+        useFallback ? AdvancedSettingsService.fallbackPassword : remotePwd;
+
+    final ctrl = TextEditingController();
+    if (!mounted) return;
+    final input = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('高级设置验证'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(useFallback ? Icons.warning_amber : Icons.check_circle,
+                    size: 16,
+                    color: useFallback
+                        ? AppConstants.warningColor
+                        : AppConstants.successColor),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    useFallback ? '没能连上补货服务器，本次用默认密码' : '服务器连接成功 ✓',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: useFallback
+                          ? AppConstants.warningColor
+                          : AppConstants.successColor,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              obscureText: true,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(hintText: '请输入验证密码'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (input == null) return;
+    if (input.trim() != effectivePwd) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(useFallback ? '密码错误（本次用默认密码校验）' : '密码错误'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+    if (!mounted) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(builder: (_) => const AdvancedSettingsPage()),
     );
   }
 

@@ -20,6 +20,7 @@ import '../services/query_service.dart';
 import '../services/session_manager.dart';
 import '../services/query_logger.dart';
 import '../services/operation_log_service.dart';
+import '../services/advanced_settings_service.dart';
 import 'stock_history_page.dart';
 import '../models/query_log.dart';
 import '../widgets/barcode_icon.dart';
@@ -166,6 +167,12 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     _loadOperatorName();
     _checkLoginStatuses();
     _startKeepAlive();
+    AdvancedSettingsService.instance.addListener(_onAdvancedSettingsChanged);
+  }
+
+  /// 高级设置的开关一改，首页的修改图标（铅笔、加号等）要立刻跟着显示/隐藏
+  void _onAdvancedSettingsChanged() {
+    if (mounted) setState(() {});
   }
 
   /// 照片后台队列完成事件：回写图片URL；同步类全成功时隐藏同步按钮
@@ -353,6 +360,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     _photoQueueSub?.cancel();
     widget.imageUpdateNotifier?.removeListener(_handleRestockImageUpdate);
     widget.supplierUpdateNotifier?.removeListener(_handleRestockSupplierUpdate);
+    AdvancedSettingsService.instance.removeListener(_onAdvancedSettingsChanged);
     _barcodeController.dispose();
     _barcodeFocus.dispose();
     _scrollController.dispose();
@@ -706,7 +714,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       if (mounted) setState(() => _photoQueuedMark = true);
       if (!mounted) return;
       _showBanner(
-          '部分门店缺图，已自动加入后台队列同步照片（${job.stores.length} 个门店，队列剩余 ${PhotoQueueService.instance.pendingCount} 条）');
+          '缺图已加入队列，自动同步 ${job.stores.length} 个门店');
     } catch (_) {
       // 入队失败静默处理，不打断查询
     }
@@ -815,6 +823,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                 child: Text(
                   _bannerMsg ?? '',
                   style: const TextStyle(color: Colors.white, fontSize: 13),
+                  // 成功类提示压成一行，避免遮住商品信息卡；报错保持换行、完整显示
+                  maxLines: _bannerError ? null : 1,
+                  overflow: _bannerError
+                      ? TextOverflow.visible
+                      : TextOverflow.ellipsis,
                 ),
               ),
             ],
@@ -1101,7 +1114,20 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                         data.barcode.isNotEmpty ? data.barcode : barcode,
                         onTap: () => _copyText(
                             data.barcode.isNotEmpty ? data.barcode : barcode),
-                      ),
+                        trailing: AdvancedSettingsService.instance.allowExtBarcode
+                            ? GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () => _showExtBarcodeEditor(data),
+                                child: const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: Icon(Icons.add_circle_outline,
+                                      size: 16,
+                                      color: AppConstants.primaryColor),
+                                ),
+                              )
+                            : null,
+),
                     ],
                   ),
                 ),
@@ -1133,8 +1159,10 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
               ),
             if (data.supplier.isNotEmpty)
               InkWell(
-                onTap: () => _showSupplierPicker(
-                    data, _supplierOverrides[barcode] ?? data.supplier),
+                onTap: AdvancedSettingsService.instance.allowSupplier
+                    ? () => _showSupplierPicker(
+                        data, _supplierOverrides[barcode] ?? data.supplier)
+                    : null,
                 borderRadius: BorderRadius.circular(4),
                 child: Padding(
                   padding: const EdgeInsets.only(top: 4),
@@ -1156,8 +1184,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      const Icon(Icons.edit,
-                          size: 13, color: Color(0xFF28a745)),
+                      if (AdvancedSettingsService.instance.allowSupplier)
+                        const Icon(Icons.edit,
+                            size: 13, color: Color(0xFF28a745)),
                     ],
                   ),
                 ),
@@ -1176,7 +1205,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                   Expanded(
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
-                      onDoubleTap: () => _showUnitEditor(data),
+                      onDoubleTap: AdvancedSettingsService.instance.allowUnit
+                          ? () => _showUnitEditor(data)
+                          : null,
                       child: Row(
                         children: [
                           Flexible(
@@ -1186,9 +1217,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          const SizedBox(width: 4),
-                          const Icon(Icons.edit,
-                              size: 12, color: AppConstants.primaryColor),
+                          if (AdvancedSettingsService.instance.allowUnit) ...[
+                            const SizedBox(width: 4),
+                            const Icon(Icons.edit,
+                                size: 12, color: AppConstants.primaryColor),
+                          ],
                         ],
                       ),
                     ),
@@ -1406,7 +1439,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       if (mounted) setState(() => _photoQueuedMark = true);
       if (!mounted) return;
       _showBanner(
-          '照片已加入后台队列，剩余 ${PhotoQueueService.instance.pendingCount} 条（自动同步 ${job.stores.length} 个门店）');
+          '照片已加入队列，自动同步 ${job.stores.length} 个门店');
     } catch (e) {
       if (mounted) _showBanner('照片入队失败：$e', isError: true);
     } finally {
@@ -1441,49 +1474,109 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     // 预览加载原图（去掉 _200x200 缩略图后缀），走缓存优先组件
     final full = url.startsWith('http') ? url : 'https://img.pospal.cn$url';
     final original = full.replaceAll('_200x200', '');
-    showDialog(
+    // 「更换照片」按钮刚打开时露一下，3 秒后自动淡出，避免挡住照片
+    Timer? hideTimer;
+    var showChangeBtn = true;
+    final dialog = showDialog(
       context: context,
-      barrierColor: Colors.black87,
-      builder: (ctx) => GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => Navigator.pop(ctx),
-        child: SizedBox.expand(
-          child: Stack(
-            children: [
-              Center(
-                child: InteractiveViewer(
-                  maxScale: 5,
-                  child: _CachedImage(
-                    url: original,
-                    fit: BoxFit.contain,
-                    radius: 0,
-                    placeholder: const Icon(Icons.broken_image, size: 64, color: Colors.white70),
-                  ),
-                ),
-              ),
-              // 放大界面内选择是否更换照片
-              Positioned(
-                right: 16,
-                bottom: 28,
-                child: FloatingActionButton.extended(
-                  heroTag: 'change_product_image',
-                  backgroundColor: Colors.white.withValues(alpha: 0.92),
-                  foregroundColor: Colors.black87,
-                  icon: const Icon(Icons.camera_alt),
-                  label: const Text('更换照片'),
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    _addProductImage(data, barcode, sourceStoreName);
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+      // 背景压得很透：放大看图时，下面的商品名称/条码/价格仍然看得清
+      barrierColor: Colors.black.withValues(alpha: 0.18),
+      builder: (ctx) {
+        final mq = MediaQuery.of(ctx);
+        // 图片整体下移：上方留出商品信息卡的位置，不遮住名称/条码/价格
+        final topGap = mq.padding.top + mq.size.height * 0.30;
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            void startHideCountdown() {
+              hideTimer?.cancel();
+              hideTimer = Timer(const Duration(seconds: 3), () {
+                if (!ctx.mounted) return;
+                setDialogState(() => showChangeBtn = false);
+              });
+            }
 
+            if (hideTimer == null) startHideCountdown();
+
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => Navigator.pop(ctx),
+              child: SizedBox.expand(
+                child: Stack(
+                  children: [
+                    Align(
+                      alignment: Alignment.bottomCenter,
+                      child: Padding(
+                        padding: EdgeInsets.only(top: topGap, bottom: 8),
+                        child: InteractiveViewer(
+                          maxScale: 5,
+                          child: _CachedImage(
+                            url: original,
+                            fit: BoxFit.contain,
+                            radius: 0,
+                            placeholder: const Icon(Icons.broken_image,
+                                size: 64, color: Colors.white70),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // 放大界面内选择是否更换照片（3 秒后淡出，只留一个小图标）
+                    Positioned(
+                      right: 16,
+                      bottom: 28,
+                      child: AnimatedOpacity(
+                        opacity: showChangeBtn ? 1 : 0,
+                        duration: const Duration(milliseconds: 250),
+                        child: IgnorePointer(
+                          ignoring: !showChangeBtn,
+                          child: FloatingActionButton.extended(
+                            heroTag: 'change_product_image',
+                            backgroundColor:
+                                Colors.white.withValues(alpha: 0.92),
+                            foregroundColor: Colors.black87,
+                            icon: const Icon(Icons.camera_alt),
+                            label: const Text('更换照片'),
+                            onPressed: () {
+                              hideTimer?.cancel();
+                              Navigator.pop(ctx);
+                              _addProductImage(data, barcode, sourceStoreName);
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+                    // 收起后留一个小相机图标，点一下还能把按钮叫回来
+                    if (!showChangeBtn)
+                      Positioned(
+                        right: 16,
+                        bottom: 28,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(20),
+                          onTap: () {
+                            setDialogState(() => showChangeBtn = true);
+                            startHideCountdown();
+                          },
+                          child: Container(
+                            width: 36,
+                            height: 36,
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.45),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.camera_alt,
+                                size: 16, color: Colors.black54),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    dialog.whenComplete(() => hideTimer?.cancel());
+  }
   final Map<String, String> _transCache = {};
 
   /// 复制文本到剪贴板并提示
@@ -1514,14 +1607,15 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       _translate(productName);
     }
 
+    final canEditName = AdvancedSettingsService.instance.allowProductName;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         GestureDetector(
-          // 单击复制，双击编辑商品名称并同步全部门店
+          // 单击复制，双击编辑商品名称并同步全部门店（关掉后不显示笔图标）
           onTap: () => _copyText(name),
-          onDoubleTap: () => _showProductNameEditor(data),
+          onDoubleTap: canEditName ? () => _showProductNameEditor(data) : null,
           child: Row(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
@@ -1537,9 +1631,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                   ),
                 ),
               ),
-              const SizedBox(width: 6),
-              const Icon(Icons.edit_outlined,
-                  size: 14, color: AppConstants.textSecondary),
+              if (canEditName) ...[
+                const SizedBox(width: 6),
+                const Icon(Icons.edit_outlined,
+                    size: 14, color: AppConstants.textSecondary),
+              ],
             ],
           ),
         ),
@@ -1631,32 +1727,51 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   }
 
   Widget _buildInfoRow(IconData icon, String label, String value,
-      {VoidCallback? onTap}) {
+      {VoidCallback? onTap, Widget? trailing}) {
+    final row = Row(
+      children: [
+        Icon(icon, size: 14, color: AppConstants.textSecondary),
+        const SizedBox(width: 6),
+        Text(
+          '$label：',
+          style: const TextStyle(
+            fontSize: 13,
+            color: AppConstants.textSecondary,
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontSize: 13),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(4),
-        child: Row(
-          children: [
-            Icon(icon, size: 14, color: AppConstants.textSecondary),
-            const SizedBox(width: 6),
-            Text(
-              '$label：',
-              style: const TextStyle(
-                fontSize: 13,
-                color: AppConstants.textSecondary,
+        // 尾部按钮（如条码旁的「+」）用叠加方式放右边，不参与行高计算：
+        // 否则会把条码行往下挤，名称/翻译/条码三行就超出右边图片框的高度了
+        child: trailing == null
+            ? row
+            : Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(right: 22),
+                    child: row,
+                  ),
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    bottom: 0,
+                    child: Center(child: trailing),
+                  ),
+                ],
               ),
-            ),
-            Expanded(
-              child: Text(
-                value,
-                style: const TextStyle(fontSize: 13),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -1672,7 +1787,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         children: [
           if (buyPrice != null) ...[
             GestureDetector(
-              onDoubleTap: () => _showPriceEditor(data, isBuy: true),
+              onDoubleTap: AdvancedSettingsService.instance.allowPrice
+                  ? () => _showPriceEditor(data, isBuy: true)
+                  : null,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1683,8 +1800,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                     'R${_numberToChinese(buyPrice)}',
                     style: const TextStyle(fontSize: 12, color: Color(0xFF8B4513)),
                   ),
-                  const SizedBox(width: 3),
-                  const Icon(Icons.edit, size: 12, color: Color(0xFF8B4513)),
+                  if (AdvancedSettingsService.instance.allowPrice) ...[
+                    const SizedBox(width: 3),
+                    const Icon(Icons.edit,
+                        size: 12, color: Color(0xFF8B4513)),
+                  ],
                 ],
               ),
             ),
@@ -1692,7 +1812,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           ],
           if (sellPrice != null)
             GestureDetector(
-              onDoubleTap: () => _showPriceEditor(data, isBuy: false),
+              onDoubleTap: AdvancedSettingsService.instance.allowPrice
+                  ? () => _showPriceEditor(data, isBuy: false)
+                  : null,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
                 child: Row(
@@ -1705,8 +1827,10 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                       'R${sellPrice.toStringAsFixed(2)}',
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.red),
                     ),
-                    const SizedBox(width: 4),
-                    const Icon(Icons.edit, size: 12, color: Colors.red),
+                    if (AdvancedSettingsService.instance.allowPrice) ...[
+                      const SizedBox(width: 4),
+                      const Icon(Icons.edit, size: 12, color: Colors.red),
+                    ],
                   ],
                 ),
               ),
@@ -2448,6 +2572,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
   /// 点击结果卡片的供货商，弹出选择框更换供货商并同步到银豹
   void _showSupplierPicker(ProductData data, String current) {
+    // 高级设置里关掉了：入口图标已经不显示，这里静默忽略，不再弹提示
+    if (!AdvancedSettingsService.instance.allowSupplier) return;
     final options = widget.supplierOptions;
     if (options.isEmpty) {
       _showBanner('暂无供货商列表，请先在配置页同步/添加供货商', isError: true);
@@ -2710,6 +2836,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
   /// 双击商品名称：弹出编辑框，确定后同步到勾选门店
   void _showProductNameEditor(ProductData data) {
+    // 高级设置里关掉了：入口图标已经不显示，这里静默忽略，不再弹提示
+    if (!AdvancedSettingsService.instance.allowProductName) return;
     final current =
         _productNameOverrides[_productKey(data)] ?? data.name;
     final controller = TextEditingController(text: current);
@@ -2933,6 +3061,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
   /// 双击售价/进价：弹出编辑框，确定后同步
   void _showPriceEditor(ProductData data, {required bool isBuy}) {
+    // 高级设置里关掉了：入口图标已经不显示，这里静默忽略，不再弹提示
+    if (!AdvancedSettingsService.instance.allowPrice) return;
     final key = _productKey(data);
     final current = isBuy
         ? (_buyPriceOverrides[key] ?? data.buyPrice)
@@ -3205,6 +3335,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
   /// 双击单位：只从该门店「已有的单位」里选（不支持自定义输入，避免银豹报错）
   Future<void> _showUnitEditor(ProductData data) async {
+    // 高级设置里关掉了：入口图标已经不显示，这里静默忽略，不再弹提示
+    if (!AdvancedSettingsService.instance.allowUnit) return;
     final key = _productKey(data);
     final current = _unitOverrides[key] ?? data.unit;
     final currentText = (current.isEmpty || current == '—') ? '' : current;
@@ -3532,6 +3664,441 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         errorDetail: report,
       );
       if (mounted) _showCopyableError('单位更新出错', report);
+    } finally {
+      if (mounted) setState(() => _syncingProductData = false);
+    }
+  }
+
+  /// 把银豹里这个商品「扩展条码」的原始返回复制出来：
+  /// 每条都带上长度，方便核对是不是多了看不见/多出来的字符（例如一个 -）
+  Future<void> _showExtBarcodeRaw(
+      StoreConfig store, String barcode, ProductData data) async {
+    final (err, product, codes) = await widget.queryService
+        .fetchProductExtBarcodes(store, barcode,
+            productUid: data.uid?.toString());
+    if (!mounted) return;
+    if (err != null) {
+      _showCopyableError('读取扩展条码原文失败',
+          '门店：${store.name}\n条码：$barcode\n原因：$err');
+      return;
+    }
+    final desc = (product?['description'] ?? '').toString();
+    final rawJson =
+        jsonEncode(product == null ? null : product['productExtBarcodes']);
+    final lines = <String>[];
+    for (var i = 0; i < codes.length; i++) {
+      final v = codes[i];
+      lines.add('第${i + 1}条：长度=${v.length}，内容=[$v]');
+    }
+    final text = '门店：${store.name}\n'
+        '主条码：$barcode（长度 ${barcode.length}）\n'
+        '扩展条码条数：${codes.length}\n'
+        '${lines.isEmpty ? '（没有扩展条码）' : lines.join('\n')}\n\n'
+        '商品描述：\n${desc.isEmpty ? '（空）' : desc}\n\n'
+        '银豹返回的原文 productExtBarcodes：\n$rawJson';
+    _showCopyableError('扩展条码原文（复制发给管理员）', text);
+  }
+
+  /// 条码旁的「+」：给商品增加扩展条码（一品多码），按模式同步到门店
+  Future<void> _showExtBarcodeEditor(ProductData data) async {
+    // 高级设置里关掉了：入口图标已经不显示，这里静默忽略，不再弹提示
+    if (!AdvancedSettingsService.instance.allowExtBarcode) return;
+    final barcode =
+        data.barcode.isNotEmpty ? data.barcode : _lastResult?.barcode ?? '';
+    if (barcode.isEmpty) {
+      _showBanner('条码为空，无法增加扩展条码', isError: true);
+      return;
+    }
+    final readStore = widget.configs.where((c) => c.enabled).firstOrNull ??
+        widget.configs.firstOrNull;
+    if (readStore == null) {
+      _showCopyableError('无法增加扩展条码', '当前没有可用门店配置，请先在配置页添加并登录门店。');
+      return;
+    }
+    _showBanner('正在读取扩展条码…', sticky: true);
+    final (err, product, existing) = await widget.queryService
+        .fetchProductExtBarcodes(readStore, barcode,
+            productUid: data.uid?.toString());
+    if (!mounted) return;
+    if (err != null) {
+      _showBanner('读取扩展条码失败', isError: true);
+      _showCopyableError(
+        '读取扩展条码失败',
+        '门店：${readStore.name}\n'
+        '条码：$barcode\n'
+        '原因：$err',
+      );
+      return;
+    }
+    // 一行一个扩展条码：已有的直接填在输入框里，可以改、可以删
+    final rows = <TextEditingController>[
+      for (final c in existing) TextEditingController(text: c),
+    ];
+    // 一个都没有时先给一行空的，方便直接输入
+    if (rows.isEmpty) rows.add(TextEditingController());
+    // 弹窗关掉后统一销毁（删掉的也在里面）
+    final allRows = <TextEditingController>[...rows];
+    String? rowError;
+
+    final dialog = showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('扩展条码', style: TextStyle(fontSize: 16)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '主条码：$barcode',
+                  style: const TextStyle(
+                      fontSize: 12, color: AppConstants.textSecondary),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '扩展条码（一行一个，可改可删）：',
+                  style: const TextStyle(
+                      fontSize: 12, color: AppConstants.textSecondary),
+                ),
+                const SizedBox(height: 6),
+                ...rows.asMap().entries.map((e) => Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: e.value,
+                              textInputAction: TextInputAction.next,
+                              decoration: InputDecoration(
+                                hintText: '扩展条码',
+                                isDense: true,
+                                border: const OutlineInputBorder(),
+                                suffixIcon: IconButton(
+                                  tooltip: '扫码识别条码',
+                                  icon: const Icon(Icons.qr_code_scanner,
+                                      size: 20),
+                                  onPressed: () =>
+                                      _scanIntoExtBarcodeField(e.value),
+                                ),
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: '删除这条',
+                            icon: const Icon(Icons.delete_outline,
+                                size: 20, color: Colors.red),
+                            onPressed: () => setDialogState(() {
+                              rows.removeAt(e.key);
+                              rowError = null;
+                            }),
+                          ),
+                        ],
+                      ),
+                    )),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    onPressed: () => setDialogState(() {
+                      final c = TextEditingController();
+                      rows.add(c);
+                      allRows.add(c);
+                      rowError = null;
+                    }),
+                    icon: const Icon(Icons.add, size: 18),
+                    label: const Text('增加一条'),
+                  ),
+                ),
+                if (rowError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(
+                      rowError!,
+                      style: const TextStyle(fontSize: 12, color: Colors.red),
+                    ),
+                  ),
+                Text(
+                  '只能由数字、字母、_ - * / 组成，最长 32 位；不能和主条码重复。\n'
+                  '${ModeService.instance.isHqMode ? '保存后同步到全部门店（总部模式走官方同步，速度快），并写入一条操作记录。' : '保存后同步到所有已勾选门店，并写入一条操作记录。'}',
+                  style: const TextStyle(
+                      fontSize: 11, color: AppConstants.textSecondary),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => _showExtBarcodeRaw(readStore, barcode, data),
+              child: const Text('复制原文'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppConstants.primaryColor,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () {
+                final (codes, err2) = _collectExtBarcodeRows(rows);
+                if (err2 != null) {
+                  setDialogState(() => rowError = err2);
+                  return;
+                }
+                final dupMain = codes.where((c) => c == barcode).toList();
+                if (dupMain.isNotEmpty) {
+                  setDialogState(() =>
+                      rowError = '扩展条码不能和主条码重复：${dupMain.join('、')}');
+                  return;
+                }
+                Navigator.pop(ctx);
+                if (_sameBarcodeList(codes, existing)) {
+                  _showBanner('扩展条码没有改动');
+                  return;
+                }
+                _syncExtBarcodeChange(data, existing, product, codes);
+              },
+              child: const Text('保存并同步'),
+            ),
+          ],
+        ),
+      ),
+    );
+    unawaited(dialog.whenComplete(() {
+      for (final c in allRows) {
+        c.dispose();
+      }
+    }));
+  }
+
+  /// 两个扩展条码列表是否完全一样（顺序也要一致）
+  static bool _sameBarcodeList(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// 扫条码后把结果填进扩展条码输入框（可连着扫多个，自动用逗号隔开）
+  Future<void> _scanIntoExtBarcodeField(
+      TextEditingController controller) async {
+    final scanned = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => ScannerView(
+          onDetect: (b) => Navigator.pop(context, b),
+          onClose: () => Navigator.pop(context),
+        ),
+      ),
+    );
+    if (!mounted) return;
+    final v = (scanned ?? '').trim();
+    if (v.isEmpty) return;
+    final cur = controller.text.trim();
+    final next = cur.isEmpty ? v : '$cur,$v';
+    controller.text = next;
+    controller.selection =
+        TextSelection.fromPosition(TextPosition(offset: next.length));
+  }
+
+  /// 收集所有输入框里的扩展条码：空行=不要了；自动去重。
+  /// 返回 (最终列表, 错误提示)，错误提示不为空时列表无效。
+  static (List<String>, String?) _collectExtBarcodeRows(
+      List<TextEditingController> rows) {
+    final out = <String>[];
+    for (final c in rows) {
+      final v = c.text.trim();
+      if (v.isEmpty) continue;
+      final vErr = QueryService.validateExtBarcode(v);
+      if (vErr != null) return (const <String>[], '$vErr：$v');
+      if (out.contains(v)) continue;
+      out.add(v);
+    }
+    return (out, null);
+  }
+
+  /// 把新增的扩展条码同步到银豹。
+  /// 总部模式：只改源店，再用官方「同步商品到门店」把「扩展条码」一次推给全部门店（快）；
+  /// 门店模式：逐店 FindProduct+SaveProduct，只处理已勾选门店。
+  /// 任何失败都弹「可复制」的报错窗口，并写进操作记录，事后也能翻出来。
+  Future<void> _syncExtBarcodeChange(
+    ProductData data,
+    List<String> existing,
+    Map<String, dynamic>? product,
+    List<String> codes,
+  ) async {
+    final hqMode = ModeService.instance.isHqMode;
+    final canOfficialSync =
+        hqMode && widget.configs.every((c) => c.storeId.isNotEmpty);
+    StoreConfig? hqSource;
+    if (canOfficialSync) {
+      hqSource = widget.configs.where((c) => c.enabled).firstOrNull ??
+          widget.configs.firstOrNull;
+    }
+    final targetStores = hqMode
+        ? <StoreConfig>[]
+        : widget.configs.where((c) => c.enabled).toList();
+    if (!canOfficialSync && targetStores.isEmpty) {
+      _showCopyableError('无法增加扩展条码',
+          '没有勾选任何门店。请在门店卡片上勾选要同步的门店后重试。');
+      return;
+    }
+    if (canOfficialSync && hqSource == null) {
+      _showCopyableError('无法增加扩展条码', '没有可用门店（门店配置为空或全部无门店ID）。');
+      return;
+    }
+    final opName = await _ensureOperatorName();
+    if (opName == null) {
+      _showBanner('请填写操作员姓名后再增加扩展条码', isError: true);
+      return;
+    }
+    final barcode =
+        data.barcode.isNotEmpty ? data.barcode : _lastResult?.barcode ?? '';
+    if (!mounted) return;
+    setState(() => _syncingProductData = true);
+    _showBanner('正在同步扩展条码…', sticky: true);
+    final errors = <String>[];
+    final storeNotes = <String>[];
+    var syncedCount = 0;
+    // 门店模式：每家店的商品描述行各不相同（原条码可能不一样），HQ 模式由官方同步写描述
+    final noteStores = <(StoreConfig, String)>[];
+    try {
+      if (canOfficialSync && hqSource != null) {
+        final source = hqSource;
+        final targets = widget.configs
+            .where((c) => c.storeKey != source.storeKey)
+            .toList();
+        final noteLabel = QueryService.extBarcodeNoteLabel(codes, existing);
+        final (gErr, results) = await widget.queryService
+            .syncProductExtBarcodesToStores(
+          source: source,
+          targets: targets,
+          barcode: barcode,
+          codes: codes,
+          product: product,
+          productUid: data.uid?.toString(),
+          noteOperatorName: opName,
+          noteActionLabel: noteLabel,
+          noteMatchLabel: '更新扩展条码',
+        );
+        if (gErr != null) {
+          errors.add('${source.name}：$gErr');
+          storeNotes.add('${source.name}：$gErr');
+        }
+        for (final r in results) {
+          if (r.$2 != null) {
+            errors.add('${r.$1.name}：${r.$2}');
+            storeNotes.add('${r.$1.name}：${r.$2}');
+          } else {
+            storeNotes.add('${r.$1.name}：成功');
+          }
+        }
+        syncedCount = results.where((r) => r.$2 == null).length;
+      } else {
+        for (final store in targetStores) {
+          try {
+            final (err, before) = await widget.queryService
+                .updateProductExtBarcodes(
+              store,
+              barcode,
+              codes: codes,
+              productUid: data.uid?.toString(),
+            );
+            if (err == null) {
+              syncedCount++;
+              storeNotes.add('${store.name}：成功');
+              noteStores.add(
+                  (store, QueryService.extBarcodeNoteLabel(codes, before)));
+            } else if (err == '未登录') {
+              errors.add('${store.name}：未登录（请先在配置页登录该门店再试）');
+              storeNotes.add('${store.name}：未登录');
+            } else {
+              errors.add('${store.name}：$err');
+              storeNotes.add('${store.name}：$err');
+            }
+          } catch (e) {
+            errors.add('${store.name}：$e');
+            storeNotes.add('${store.name}：$e');
+          }
+        }
+      }
+      if (!mounted) return;
+      if (errors.isEmpty) {
+        final descErrors = <String>[];
+        for (final (store, label) in noteStores) {
+          try {
+            final err = await widget.queryService.updateProductOperationNote(
+              store,
+              barcode,
+              opName,
+              label,
+              productUid: data.uid?.toString(),
+              matchLabel: '更新扩展条码',
+            );
+            if (err != null && err != '未登录') {
+              descErrors.add('${store.name}：$err');
+            }
+          } catch (e) {
+            descErrors.add('${store.name}：$e');
+          }
+        }
+        final scope = canOfficialSync ? widget.configs.length : syncedCount;
+        if (descErrors.isEmpty) {
+          final actionWord = codes.isEmpty ? '扩展条码已全部删除' : '扩展条码已更新';
+          _showBanner('$actionWord，同步 $scope 家门店 ✓');
+        } else {
+          final descTxt = descErrors.map(_oneLine).join('\n');
+          final report = '商品：${data.name}（条码 $barcode）\n'
+              '扩展条码：${codes.isEmpty ? '无' : codes.join('、')}\n\n'
+              '扩展条码已经加成功，但操作记录没写进去：\n$descTxt';
+          OperationLogService.add(
+            store: '扩展条码',
+            action: '描述写入失败',
+            barcode: barcode,
+            detail: '商品：${data.name}（条码 $barcode）\n'
+                '扩展条码已加成功，但操作记录没写进去：\n$descTxt',
+            name: data.name,
+            errorDetail: descErrors.join('\n'),
+          );
+          _showCopyableError('扩展条码已增加，但操作记录未写入', report);
+        }
+      } else {
+        final storeSummary = storeNotes.map(_oneLine).join('\n');
+        final report = '商品：${data.name}（条码 $barcode）\n'
+            '扩展条码：${codes.isEmpty ? '无' : codes.join('、')}\n'
+            '原有扩展条码：${existing.isEmpty ? '无' : existing.join('、')}\n'
+            '当前模式：${hqMode ? '总部模式' : '门店模式'}\n\n'
+            '各门店结果：\n$storeSummary\n\n'
+            '错误明细：\n${errors.join('\n')}';
+        OperationLogService.add(
+          store: '扩展条码',
+          action: '更新失败',
+          barcode: barcode,
+          detail: '商品：${data.name}（条码 $barcode）\n'
+              '扩展条码：${codes.isEmpty ? '无' : codes.join('、')}\n'
+              '各门店结果：\n$storeSummary',
+          name: data.name,
+          errorDetail: report,
+        );
+        _showCopyableError('扩展条码增加失败', report);
+      }
+    } catch (e, st) {
+      final report = '商品：${data.name}（条码 $barcode）\n'
+          '扩展条码：${codes.isEmpty ? '无' : codes.join('、')}\n'
+          '异常：$e\n\n'
+          '技术细节：\n$st';
+      OperationLogService.add(
+        store: '扩展条码',
+        action: '更新异常',
+        barcode: barcode,
+        detail: '商品：${data.name}（条码 $barcode）\n'
+            '扩展条码：${codes.isEmpty ? '无' : codes.join('、')}\n'
+            '异常：${_oneLine(e.toString())}',
+        name: data.name,
+        errorDetail: report,
+      );
+      if (mounted) _showCopyableError('扩展条码增加出错', report);
     } finally {
       if (mounted) setState(() => _syncingProductData = false);
     }

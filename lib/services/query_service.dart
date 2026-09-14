@@ -2174,6 +2174,7 @@ class QueryService {
     required String barcode,
     required void Function(Map<String, dynamic> product) apply,
     required List<String> attributes,
+    Map<String, dynamic>? product,
     String? productUid,
     String? noteOperatorName,
     String? noteActionLabel,
@@ -2184,32 +2185,37 @@ class QueryService {
       return ('条码为空', const <(StoreConfig, String?, int)>[]);
     }
 
-    // 1. 取源店商品 JSON
-    final (pErr, product) = await fetchProductForSync(
-      source,
-      code,
-      productUid: productUid,
-    );
-    if (pErr != null) return (pErr, const <(StoreConfig, String?, int)>[]);
-    if (product == null) {
-      return ('源商品数据为空', const <(StoreConfig, String?, int)>[]);
+    // 1. 取源店商品 JSON（调用方已读好时可传入，省一次请求）
+    Map<String, dynamic> src;
+    if (product != null) {
+      src = product;
+    } else {
+      final (pErr, p) =
+          await fetchProductForSync(source, code, productUid: productUid);
+      if (pErr != null) {
+        return (pErr, const <(StoreConfig, String?, int)>[]);
+      }
+      if (p == null) {
+        return ('源商品数据为空', const <(StoreConfig, String?, int)>[]);
+      }
+      src = p;
     }
 
     // 2. 改字段（可选：同时把操作记录合并进商品描述）并保存回源店
-    apply(product);
+    apply(src);
     var noteWritten = false;
     if (noteOperatorName != null &&
         noteOperatorName.trim().isNotEmpty &&
         noteActionLabel != null &&
         noteActionLabel.isNotEmpty) {
-      product['description'] = mergeOperationNoteLine(
-        product['description'] as String?,
+      src['description'] = mergeOperationNoteLine(
+        src['description'] as String?,
         buildOperationNote(noteOperatorName, noteActionLabel),
         noteMatchLabel ?? noteActionLabel,
       );
       noteWritten = true;
     }
-    final saveErr = await _saveProductRaw(source, product);
+    final saveErr = await _saveProductRaw(source, src);
     if (saveErr != null) return (saveErr, const <(StoreConfig, String?, int)>[]);
 
     // 3. 官方同步指定字段（含商品描述 remarks）到其余门店
@@ -2222,7 +2228,7 @@ class QueryService {
       targets: targets,
       barcode: code,
       productUid: productUid,
-      product: product,
+      product: src,
       attributes: attrs,
     );
   }
@@ -2918,6 +2924,128 @@ class QueryService {
       repaired: repaired,
     );
   }
+  /// 扩展条码（一品多码）：读取商品 JSON 里的 productExtBarcodes 数组
+  static List<String> extBarcodesOf(Map<String, dynamic> product) {
+    final raw = product['productExtBarcodes'];
+    final out = <String>[];
+    if (raw is! List) return out;
+    for (final e in raw) {
+      final v = e is Map
+          ? (e['extBarcode'] ?? '').toString().trim()
+          : e.toString().trim();
+      if (v.isNotEmpty && !out.contains(v)) out.add(v);
+    }
+    return out;
+  }
+
+  /// 把扩展条码写回商品 JSON（网页保存时传的就是这个数组）
+  static void applyExtBarcodes(
+      Map<String, dynamic> product, List<String> extBarcodes) {
+    product['productExtBarcodes'] = <Map<String, dynamic>>[
+      for (final b in extBarcodes) <String, dynamic>{'extBarcode': b},
+    ];
+  }
+
+  /// 扩展条码合法字符（与银豹一致）：数字、字母、_ - * /，最长 32 位
+  static String? validateExtBarcode(String extBarcode) {
+    final v = extBarcode.trim();
+    if (v.isEmpty) return '扩展条码不能为空';
+    if (v.length > 32) return '扩展条码最长 32 位';
+    if (!RegExp(r'^[0-9A-Za-z_\-*/]+$').hasMatch(v)) {
+      return '扩展条码只能由数字、字母、_ - * / 组成';
+    }
+    return null;
+  }
+
+
+
+  /// 操作记录文案：更新扩展条码A123（原条码无）
+  static String extBarcodeNoteLabel(
+      List<String> now, List<String> before) {
+    final oldText = before.isEmpty ? '无' : before.join('、');
+    final newText = now.isEmpty ? '无' : now.join('、');
+    return '更新扩展条码$newText（原条码$oldText）';
+  }
+
+  /// 读取某个门店商品当前的扩展条码（商品 JSON 一并带回来，供总部模式同步复用）
+  Future<(String? error, Map<String, dynamic>? product, List<String> existing)>
+      fetchProductExtBarcodes(
+    StoreConfig store,
+    String barcode, {
+    String? productUid,
+  }) async {
+    final (err, product) =
+        await fetchProductForSync(store, barcode, productUid: productUid);
+    if (err != null) return (err, null, const <String>[]);
+    if (product == null) return ('未找到该商品', null, const <String>[]);
+    return (null, product, extBarcodesOf(product));
+  }
+
+  /// 门店模式：给单个门店的商品写入扩展条码（FindProduct → 改 → SaveProduct）。
+  /// [codes] 是最终要保存的完整列表（传空列表就是全部清空）。
+  /// 返回 (错误信息, 修改前的扩展条码)。
+  Future<(String?, List<String>)> updateProductExtBarcodes(
+    StoreConfig store,
+    String barcode, {
+    required List<String> codes,
+    String? productUid,
+  }) async {
+    final code = barcode.trim();
+    if (code.isEmpty) return ('条码为空', const <String>[]);
+    final (pErr, product) =
+        await fetchProductForSync(store, code, productUid: productUid);
+    if (pErr != null) return (pErr, const <String>[]);
+    if (product == null) return ('未找到该商品', const <String>[]);
+    final before = extBarcodesOf(product);
+    applyExtBarcodes(product, codes);
+    final saveErr = await _saveProductRaw(store, product);
+    if (saveErr != null) return (saveErr, before);
+    return (null, before);
+  }
+
+  /// 总部模式：只改源店（含写操作记录），再用官方「同步商品到门店」
+  /// 把「扩展条码」推给所有门店（和同步图片同一个接口，很快）。
+  /// [product] 传已读好的源店商品 JSON 可省一次请求。
+  Future<(String?, List<(StoreConfig store, String? error, int ms)>)>
+      syncProductExtBarcodesToStores({
+    required StoreConfig source,
+    required List<StoreConfig> targets,
+    required String barcode,
+    required List<String> codes,
+    Map<String, dynamic>? product,
+    String? productUid,
+    String? noteOperatorName,
+    String? noteActionLabel,
+    String? noteMatchLabel,
+  }) async {
+    Map<String, dynamic> src;
+    if (product != null) {
+      src = product;
+    } else {
+      final (pErr, p) =
+          await fetchProductForSync(source, barcode, productUid: productUid);
+      if (pErr != null) {
+        return (pErr, const <(StoreConfig, String?, int)>[]);
+      }
+      if (p == null) {
+        return ('源商品数据为空', const <(StoreConfig, String?, int)>[]);
+      }
+      src = p;
+    }
+    return syncProductFieldsToStores(
+      source: source,
+      targets: targets,
+      barcode: barcode,
+      productUid: productUid,
+      product: src,
+      attributes: const ['productExtBarcode'],
+      apply: (p) => applyExtBarcodes(p, codes),
+      noteOperatorName: noteOperatorName,
+      noteActionLabel: noteActionLabel,
+      noteMatchLabel: noteMatchLabel,
+    );
+  }
+
   /// 生成一行操作记录文本：`2026.09.11 张三：更新商品售价 R35.00`
   static String buildOperationNote(String operatorName, String actionLabel) {
     final now = DateTime.now();
