@@ -21,6 +21,7 @@ import '../services/session_manager.dart';
 import '../services/query_logger.dart';
 import '../services/operation_log_service.dart';
 import '../services/advanced_settings_service.dart';
+import '../utils/image_quality.dart';
 import 'stock_history_page.dart';
 import '../models/query_log.dart';
 import '../widgets/barcode_icon.dart';
@@ -152,9 +153,12 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   void _showBanner(String msg, {bool isError = false, bool sticky = false}) {
     _bannerTimer?.cancel();
     setState(() { _bannerMsg = msg; _bannerError = isError; });
-    if (sticky) return; // 长任务期间保持显示，任务结束时由最终提示替换
-    _bannerTimer = Timer(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _bannerMsg = null);
+    // sticky 表示长任务期间保持显示，任务结束时由最终提示替换；
+    // 兜底：万一某个流程中途退出（弹窗被取消、抛异常等）没人替换它，
+    // 最多也只挂 20 秒就自动消失，不会再出现「顶部一直提示…」消不掉的情况。
+    _bannerTimer = Timer(
+        Duration(seconds: sticky ? 20 : 2), () {
+      if (mounted && _bannerMsg == msg) setState(() => _bannerMsg = null);
     });
   }
 
@@ -559,7 +563,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           final entryId = await OperationLogService.add(
             store: storeNames,
             action: '多店查询',
-            barcode: barcode.trim(),
+            // 记录里要写商品的完整条码：用户可能是按名称搜的、或只输了前几位，
+            // 不能照抄搜索框里的内容（优先用银豹返回的商品条码）
+            barcode: _fullBarcodeFor(prod, _lastResult!),
             detail: _elapsedText,
             name: prodName.isEmpty ? null : prodName,
             stocks: stockParts.isEmpty ? null : stockParts.join('  '),
@@ -1364,6 +1370,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   /// 无图时点击：拍照/导入图片 → CropPage 手动裁剪成正方形 → 后台队列提交（全门店）
   Future<void> _addProductImage(ProductData data, String barcode,
       String? sourceStoreName) async {
+    // 用户可能是按商品名称、或者只输了条码前几位搜到的：
+    // 加照片、排队、写记录一律用「商品的完整条码」，不用搜索框里输入的内容。
+    final code = data.barcode.trim().isNotEmpty ? data.barcode.trim() : barcode;
     // 选择图片来源
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
@@ -1396,6 +1405,20 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     );
     if (croppedPath == null || !mounted) return;
 
+    // 空白照片（镜头被挡/选到空图/裁剪框只框到纯色）直接拦下：
+    // 提交它会把银豹里原本正常的商品照片覆盖成空白
+    try {
+      final probe = await File(croppedPath).readAsBytes();
+      // strict: false —— 这张图是裁剪页刚刚在内存里检查过、刚写出来的文件，
+      // 个别机型上「重新解码自己的 JPEG」会失败，不能因此拦掉正常照片。
+      final blank =
+          ImageQuality.blankReason(probe, label: '这张照片', strict: false);
+      if (blank != null) {
+        if (mounted) _showCopyableError('照片是空白的，已停止上传', blank);
+        return;
+      }
+    } catch (_) {}
+
     final opName = await _ensureOperatorName();
     if (opName == null) {
       _showBanner('请填写操作员姓名后再上传图片', isError: true);
@@ -1425,7 +1448,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       final raw = await File(croppedPath).readAsBytes();
       final job = await PhotoQueueService.instance.enqueue(
         type: PhotoJobType.add,
-        barcode: barcode,
+        barcode: code,
         productName: data.name,
         productUid: data.uid?.toString(),
         sourceStore: srcConfig,
@@ -1434,12 +1457,14 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         writeDesc: true,
         stores: stores,
       );
-      _queueWatchBarcode = barcode;
+      _queueWatchBarcode = code;
       _queueWatchUid = data.uid?.toString();
       if (mounted) setState(() => _photoQueuedMark = true);
       if (!mounted) return;
       _showBanner(
           '照片已加入队列，自动同步 ${job.stores.length} 个门店');
+    } on PhotoBlankException catch (e) {
+      if (mounted) _showCopyableError('照片是空白的，已停止上传', e.detail);
     } catch (e) {
       if (mounted) _showBanner('照片入队失败：$e', isError: true);
     } finally {
@@ -1877,6 +1902,16 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         ?.data;
   }
 
+  /// 操作记录要用「商品的完整条码」。
+  /// 用户可能输入的是商品名称，或者只输了条码的前几位（甚至多输了空格），
+  /// 记录里不能照抄搜索框内容——以银豹返回的商品条码为准，取不到才退回搜索词。
+  /// 取不到商品时也顺手去掉搜索词里多余的空格，避免记录成「123 456」。
+  String _fullBarcodeFor(ProductData? prod, MultiStoreResult r) {
+    final fromProduct = (prod?.barcode ?? '').trim();
+    if (fromProduct.isNotEmpty) return fromProduct;
+    return r.barcode.replaceAll(RegExp(r'\s+'), '');
+  }
+
   /// 搜索结果存在多个匹配商品时，弹窗让用户选择要查看的商品
   Future<void> _maybeShowCandidatePicker() async {
     final r = _lastResult;
@@ -2198,7 +2233,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                       controller: _barcodeController,
                       focusNode: _barcodeFocus,
                       enabled: !_dataBusy,
-                      keyboardType: TextInputType.text,
+                      keyboardType: TextInputType.number,
                       decoration: InputDecoration(
                         hintText: '扫描或输入条码',
                         isDense: true,
@@ -3720,6 +3755,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         .fetchProductExtBarcodes(readStore, barcode,
             productUid: data.uid?.toString());
     if (!mounted) return;
+    // 读完就把「正在读取…」这条提示收掉：之前关掉弹窗它还一直挂在顶部
+    if (err == null) _showBanner('已读取扩展条码（${existing.length} 条）');
     if (err != null) {
       _showBanner('读取扩展条码失败', isError: true);
       _showCopyableError(
@@ -3770,6 +3807,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                             child: TextField(
                               controller: e.value,
                               textInputAction: TextInputAction.next,
+                              // 安卓上点条码输入框默认给数字键盘（条码基本都是数字，也可以扫码/粘贴）
+                              keyboardType: TextInputType.number,
                               decoration: InputDecoration(
                                 hintText: '扩展条码',
                                 isDense: true,

@@ -15,7 +15,9 @@ import '../services/operation_log_service.dart';
 import '../services/offline_queue_service.dart';
 import '../services/photo_queue_service.dart';
 import '../utils/constants.dart';
+import '../utils/image_quality.dart';
 import '../widgets/barcode_icon.dart';
+import '../widgets/copyable_error_dialog.dart';
 import '../widgets/scanner_view.dart';
 
 /// 补货页面（日常补货 + 顾客预定 + 订单查询）
@@ -286,11 +288,45 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     }
   }
 
-  /// 优先使用查询时预下载的缓存图片，未命中再现场下载
+  /// 优先使用查询时预下载的缓存图片，未命中再现场下载。
+  ///
+  /// 拿到后立刻处理两件事：
+  /// 1）空白图/损坏图/占位图 → 不当照片用，给可复制提示，让用户手动拍一张；
+  /// 2）统一转成「标准 JPEG 小图」（和拍照裁剪出来的一致）。
+  ///    银豹 CDN 上的原图常常是几 MB 的原始大图，直接提交给补货服务器
+  ///    容易被截断/存成空白图片 —— 这就是「自动获取的照片是空白」的原因。
   Future<void> _downloadPrefillImage(String url) async {
     final path = await ProductImageCache.ensureDownloaded(url);
     if (!mounted || path == null) return;
-    setState(() => _imageFile = File(path));
+    List<int>? raw;
+    try {
+      raw = await File(path).readAsBytes();
+    } catch (_) {
+      raw = null;
+    }
+    if (!mounted || raw == null || raw.isEmpty) return;
+
+    final blank = ImageQuality.blankReason(raw, label: '自动获取的照片');
+    if (blank != null) {
+      _showCopyableError('自动获取的照片不可用', '$blank\n\n来源：$url');
+      return;
+    }
+    final (normalized, normErr) = ImageQuality.normalizeForUpload(raw);
+    if (normalized == null) {
+      _showCopyableError(
+          '自动获取的照片不可用', '${normErr ?? '无法解析这张照片'}\n\n来源：$url');
+      return;
+    }
+    try {
+      final out = File(
+          '${Directory.systemTemp.path}/prefill_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      await out.writeAsBytes(normalized, flush: true);
+      if (!mounted) return;
+      setState(() => _imageFile = out);
+    } catch (_) {
+      // 写临时文件失败就退回原始缓存文件
+      if (mounted) setState(() => _imageFile = File(path));
+    }
   }
 
   @override
@@ -431,7 +467,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     setState(() => _submitting = true);
     try {
       final imageBytes = await _imageFile!.readAsBytes();
-      final ok = await widget.service.submitReplenish(
+      final res = await widget.service.submitReplenish(
         shopName: _selectedShop!,
         barcode: _barcodeCtrl.text,
         quantity: _qtyCtrl.text.trim(),
@@ -439,6 +475,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
         imageBytes: imageBytes,
         imageName: 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg',
       );
+      final ok = res.ok;
 
       if (mounted) {
         // 银豹同步（不阻断补货流程）：供货商即时同步；新照片改走后台队列
@@ -474,6 +511,10 @@ class _ReplenishFormState extends State<_ReplenishForm> {
               stores: stores,
             );
             syncMsgs.add('照片已加入队列，自动同步${stores.length}个门店');
+          } on PhotoBlankException catch (e) {
+            // 照片本身是空白的（镜头被挡/选到空图）：不提交，银豹里的原有照片保持不动
+            syncMsgs.add('照片未同步（照片是空白的）');
+            _showCopyableError('照片是空白的，已停止同步', e.detail);
           } catch (e) {
             syncMsgs.add('照片入队失败：$e');
           }
@@ -488,7 +529,12 @@ class _ReplenishFormState extends State<_ReplenishForm> {
             action: '补货',
             barcode: _barcodeCtrl.text,
             detail: '数量: ${_qtyCtrl.text.trim()}',
+            errorDetail: res.detail.isEmpty ? null : res.detail,
           );
+          // 服务器受理了，但照片有问题（例如拿到的不是标准 JPEG）：给出可复制的取证
+          if (res.detail.isNotEmpty) {
+            _showCopyableError('照片可能无法显示（补货已受理）', res.detail);
+          }
           final submittedBarcode = _barcodeCtrl.text;
           _resetForm();
           widget.onSubmitted?.call();
@@ -516,14 +562,26 @@ class _ReplenishFormState extends State<_ReplenishForm> {
           }
         } else {
           final saved = await _saveReplenishOffline(imageBytes);
-          final baseMsg = saved
-              ? '服务器无法连接，已保存到本地，服务器恢复后自动提交'
-              : '提交失败，请检查网络和服务器地址';
+          final baseMsg = res.networkFailure
+              ? (saved
+                  ? '连不上补货服务器，已保存到本地，服务器恢复后自动提交'
+                  : '连不上补货服务器，本地保存也失败')
+              : '补货服务器返回错误，提交失败';
           if (syncMsgs.isNotEmpty) {
             _showMsg('$baseMsg，${syncMsgs.join('，')}');
           } else {
             _showMsg(baseMsg);
           }
+          // 完整取证：弹可复制窗口，并写进操作记录（之后还能从记录里点开复制）
+          unawaited(OperationLogService.add(
+            store: _selectedShop ?? '',
+            action: '补货',
+            barcode: _barcodeCtrl.text,
+            detail: '数量: ${_qtyCtrl.text.trim()}（提交补货服务器失败）',
+            errorDetail: res.detail,
+          ));
+          _showCopyableError(
+              res.networkFailure ? '连不上补货服务器' : '补货服务器提交失败', res.detail);
           if (saved) {
             // 数据已保存到本地，等同提交成功处理：清空表单、返回首页（照片已入后台队列）
             final submittedBarcode = _barcodeCtrl.text;
@@ -698,6 +756,12 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     });
   }
 
+  /// 报错一律用「可选中文本 + 一键复制」的弹窗，方便复制发出来（不要一闪而过的提示）
+  void _showCopyableError(String title, String detail) {
+    if (!mounted) return;
+    unawaited(showCopyableError(context, title, detail));
+  }
+
   void _showMsg(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -738,7 +802,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                   child: TextFormField(
                     controller: _barcodeCtrl,
                     decoration: _inputDecoration(hint: '手动输入或扫码'),
-                    keyboardType: TextInputType.text,
+                    keyboardType: TextInputType.number,
                     onChanged: _onBarcodeChanged,
                   ),
                 ),
@@ -1118,7 +1182,7 @@ class _BookingFormState extends State<_BookingForm> {
     setState(() => _submitting = true);
     try {
       final imageBytes = await _imageFile!.readAsBytes();
-      final ok = await widget.service.submitBooking(
+      final res = await widget.service.submitBooking(
         shopName: _selectedShop,
         phone: _phoneCtrl.text.trim(),
         barcode: _barcodeCtrl.text,
@@ -1127,6 +1191,7 @@ class _BookingFormState extends State<_BookingForm> {
         imageBytes: imageBytes,
         imageName: 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg',
       );
+      final ok = res.ok;
 
       if (mounted) {
         if (ok) {
@@ -1158,7 +1223,17 @@ class _BookingFormState extends State<_BookingForm> {
               createdAt: DateTime.now().toIso8601String(),
             ),
           );
-          _showMsg(saved ? '服务器无法连接，已保存到本地，连接服务器后自动提交' : '提交失败，请检查网络和服务器地址');
+          _showMsg(saved ? '连不上补货服务器，已保存到本地，连接服务器后自动提交' : '提交失败，请检查网络和服务器地址');
+          // 完整取证：弹可复制窗口，并写进操作记录
+          unawaited(OperationLogService.add(
+            store: _selectedShop ?? '',
+            action: '预定',
+            barcode: _barcodeCtrl.text,
+            detail: '数量: ${_qtyCtrl.text.trim()}（提交补货服务器失败）',
+            errorDetail: res.detail,
+          ));
+          _showCopyableError(
+              res.networkFailure ? '连不上补货服务器' : '补货服务器提交失败', res.detail);
         }
       }
     } catch (e) {
@@ -1197,6 +1272,12 @@ class _BookingFormState extends State<_BookingForm> {
       _imageFile = null;
       _selectedShop = null;
     });
+  }
+
+  /// 报错用「可选中文本 + 一键复制」的弹窗
+  void _showCopyableError(String title, String detail) {
+    if (!mounted) return;
+    unawaited(showCopyableError(context, title, detail));
   }
 
   void _showMsg(String msg) {
@@ -1256,7 +1337,7 @@ class _BookingFormState extends State<_BookingForm> {
                   child: TextFormField(
                     controller: _barcodeCtrl,
                     decoration: _inputDecoration(hint: '选填'),
-                    keyboardType: TextInputType.text,
+                    keyboardType: TextInputType.number,
                   ),
                 ),
                 const SizedBox(width: 8),

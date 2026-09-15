@@ -3,6 +3,18 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'config_service.dart';
 import '../models/store_config.dart';
+import '../utils/image_quality.dart';
+
+/// 补货/预定提交结果。
+/// [ok] 为 false 时 [detail] 是可直接复制的完整取证信息（请求地址/字段/照片信息/HTTP状态/响应原文）；
+/// [ok] 为 true 但 [detail] 非空时，表示服务器已受理但有需要留意的隐患（例如照片不是标准格式）。
+class RestockSubmitResult {
+  final bool ok;
+  final String detail;
+  final bool networkFailure;
+  const RestockSubmitResult(this.ok,
+      {this.detail = '', this.networkFailure = false});
+}
 
 /// 补货/预定/订单查询 服务
 /// 与本地 WebServer (WebServer.exe) 通信
@@ -49,7 +61,7 @@ class RestockService {
   }
 
   /// 提交补货单
-  Future<bool> submitReplenish({
+  Future<RestockSubmitResult> submitReplenish({
     required String shopName,
     String barcode = '',
     required String quantity,
@@ -69,7 +81,7 @@ class RestockService {
   }
 
   /// 提交顾客预定
-  Future<bool> submitBooking({
+  Future<RestockSubmitResult> submitBooking({
     String? shopName,
     required String phone,
     String barcode = '',
@@ -90,8 +102,15 @@ class RestockService {
     );
   }
 
-  /// 通用表单提交（手动构建 multipart 请求，确保编码兼容）
-  Future<bool> _submitForm({
+  /// 通用表单提交（手动构建 multipart 请求，确保编码兼容）。
+  ///
+  /// 两个关键点：
+  /// 1. 照片一律先转成「标准 JPEG 小图」（和拍照裁剪出来的图完全一致）再上传。
+  ///    自动获取的照片来自银豹 CDN，常常是原始大图（几 MB，甚至不是标准 JPEG），
+  ///    直接提交给补货服务器容易被截断/存成空白图片 —— 这就是「自动获取的照片是空白」的原因。
+  /// 2. 无论成功失败，都把整份请求/响应取证信息写进 [RestockSubmitResult.detail]，
+  ///    失败时可以直接复制发出来。
+  Future<RestockSubmitResult> _submitForm({
     required String endpoint,
     required String shopName,
     required String barcode,
@@ -101,59 +120,141 @@ class RestockService {
     List<int>? imageBytes,
     String? imageName,
   }) async {
+    final uri = Uri.parse('${serverUrl}/index.esp?$endpoint');
+    final sw = Stopwatch()..start();
+
+    // 照片统一处理
+    var uploadBytes = imageBytes;
+    String imageInfo = (imageBytes == null || imageBytes.isEmpty)
+        ? '（本次没有照片）'
+        : ImageQuality.describe(imageBytes);
+    String? imageWarn;
+    if (imageBytes != null && imageBytes.isNotEmpty) {
+      final (normalized, normErr) = ImageQuality.normalizeForUpload(imageBytes);
+      if (normalized == null) {
+        imageWarn = normErr;
+      } else {
+        uploadBytes = normalized;
+        if (normalized.length != imageBytes.length) {
+          imageInfo = '${ImageQuality.describe(normalized)}'
+              '（已从 ${ImageQuality.describe(imageBytes)} 压缩）';
+        }
+      }
+    }
+    final fileName =
+        imageName ?? 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final opName =
+        _config.operatorName.isNotEmpty ? _config.operatorName : '未知操作员';
+
+    final boundary =
+        '----FormBoundary${DateTime.now().millisecondsSinceEpoch}';
+    final body = <int>[];
+    void addField(String name, String value) {
+      body.addAll(utf8.encode('--$boundary\r\n'));
+      body.addAll(utf8.encode(
+          'Content-Disposition: form-data; name="$name"\r\n\r\n'));
+      body.addAll(utf8.encode(value));
+      body.addAll(utf8.encode('\r\n'));
+    }
+
+    addField('shopname', shopName.replaceAll('&', ''));
+    addField('barcode', barcode.replaceAll('&', ''));
+    addField('quantity', quantity);
+    addField('desc', desc.replaceAll('&', ''));
+    addField('Operators', opName);
+    if (phone != null && phone.isNotEmpty) {
+      addField('phone', phone);
+    }
+    if (uploadBytes != null && uploadBytes.isNotEmpty) {
+      body.addAll(utf8.encode('--$boundary\r\n'));
+      body.addAll(utf8.encode(
+          'Content-Disposition: form-data; name="image"; filename="$fileName"\r\n'));
+      body.addAll(utf8.encode('Content-Type: image/jpeg\r\n\r\n'));
+      body.addAll(uploadBytes);
+      body.addAll(utf8.encode('\r\n'));
+    }
+    body.addAll(utf8.encode('--$boundary--\r\n'));
+
+    final payloadLines = <String>[
+      'shopname=$shopName',
+      'barcode=$barcode',
+      'quantity=$quantity',
+      'desc=$desc',
+      if (phone != null && phone.isNotEmpty) 'phone=$phone',
+      'Operators=$opName',
+      'image=$fileName（$imageInfo）',
+    ];
+
+    String report(String reason,
+        {int? status, String? headers, List<int>? respBody}) {
+      final b = respBody ?? const <int>[];
+      final buf = StringBuffer()
+        ..writeln('操作：提交${endpoint == 'booking' ? '顾客预定' : '补货'}到补货服务器')
+        ..writeln('时间：${DateTime.now().toIso8601String()}')
+        ..writeln('请求：POST ${uri.toString()}')
+        ..writeln('请求字段：')
+        ..writeln('  ${payloadLines.join('\n  ')}')
+        ..writeln('请求体大小：${body.length} 字节')
+        ..writeln('结果：$reason')
+        ..writeln('耗时：${sw.elapsedMilliseconds} ms');
+      if (status != null) buf.writeln('HTTP状态：$status');
+      if (headers != null && headers.isNotEmpty) {
+        buf.writeln('响应头：');
+        buf.writeln(headers.trimRight());
+      }
+      if (status != null) {
+        buf.writeln('响应内容（${b.length} 字节）');
+        buf.writeln('HEX(前8字节)：${ImageQuality.headHex(b)}');
+        buf.writeln('文本：${_decodeBody(b)}');
+      }
+      if (imageWarn != null) buf.writeln('照片问题：$imageWarn');
+      return buf.toString().trimRight();
+    }
+
     try {
       final client = HttpClient();
-      client.connectionTimeout = const Duration(seconds: 15);
-      final uri = Uri.parse('${serverUrl}/index.esp?$endpoint');
+      client.connectionTimeout = const Duration(seconds: 20);
       final request = await client.postUrl(uri);
-
-      final boundary =
-          '----FormBoundary${DateTime.now().millisecondsSinceEpoch}';
       request.headers.contentType = ContentType(
         'multipart',
         'form-data',
         parameters: {'boundary': boundary},
       );
-
-      final body = <int>[];
-
-      void addField(String name, String value) {
-        body.addAll(utf8.encode('--$boundary\r\n'));
-        body.addAll(utf8.encode(
-            'Content-Disposition: form-data; name="$name"\r\n\r\n'));
-        body.addAll(utf8.encode(value));
-        body.addAll(utf8.encode('\r\n'));
-      }
-
-      addField('shopname', shopName.replaceAll('&', ''));
-      addField('barcode', barcode.replaceAll('&', ''));
-      addField('quantity', quantity);
-      addField('desc', desc.replaceAll('&', ''));
-      final opName = _config.operatorName.isNotEmpty ? _config.operatorName : '未知操作员';
-      addField('Operators', opName);
-      if (phone != null && phone.isNotEmpty) {
-        addField('phone', phone);
-      }
-
-      if (imageBytes != null && imageBytes.isNotEmpty) {
-        body.addAll(utf8.encode('--$boundary\r\n'));
-        body.addAll(utf8.encode(
-            'Content-Disposition: form-data; name="image"; filename="${imageName ?? 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg'}"\r\n'));
-        body.addAll(utf8.encode('Content-Type: image/jpeg\r\n\r\n'));
-        body.addAll(imageBytes);
-        body.addAll(utf8.encode('\r\n'));
-      }
-
-      body.addAll(utf8.encode('--$boundary--\r\n'));
-
       request.contentLength = body.length;
       request.add(body);
-
-      final response = await request.close();
-      return response.statusCode == 200;
+      final response = await request.close().timeout(const Duration(seconds: 60));
+      final respBytes = <int>[];
+      await for (final chunk in response) {
+        respBytes.addAll(chunk);
+      }
+      final respHeaders = StringBuffer();
+      response.headers.forEach((k, v) {
+        respHeaders.writeln('  $k: ${v.join(', ')}');
+      });
+      client.close(force: true);
+      final ok = response.statusCode == 200;
+      if (ok && imageWarn == null) {
+        return const RestockSubmitResult(true);
+      }
+      return RestockSubmitResult(ok,
+          detail: report(
+            ok ? '服务器已受理，但照片可能无法显示' : '补货服务器返回错误',
+            status: response.statusCode,
+            headers: respHeaders.toString(),
+            respBody: respBytes,
+          ));
     } catch (e) {
-      return false;
+      return RestockSubmitResult(false,
+          detail: report('连不上补货服务器：${e.runtimeType}: $e'),
+          networkFailure: true);
     }
+  }
+
+  static String _decodeBody(List<int> bytes) {
+    if (bytes.isEmpty) return '（空）';
+    var text = utf8.decode(bytes, allowMalformed: true);
+    if (text.length > 2000) text = '${text.substring(0, 2000)}…（已截断）';
+    return text;
   }
 
   /// 查询订单记录

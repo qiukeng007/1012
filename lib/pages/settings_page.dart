@@ -1127,10 +1127,10 @@ class _SettingsPageState extends State<SettingsPage> {
           '记录数: ${jobs.length} 条（配置页保留最近 ${PhotoQueueService.historyCap} 条）');
       buf.writeln('');
       buf.writeln('说明（字段口径）:');
-      buf.writeln('  总耗时 = 点击提交入队 → 任务彻底结束（含排队等待、重试退避、App 中途退后台时间）');
-      buf.writeln('  排队等待 = 创建时间 → 首次开始处理；实际处理 = 首次开始 → 完成');
-      buf.writeln('  若连续提交多条照片，后一条需等前一条跑完才开始，排队时间会计入总耗时');
-      buf.writeln('  总耗时明显大于单个门店耗时，通常来自：排队等待、失败重试退避、App 切后台、写操作记录');
+      buf.writeln('  实际处理 = 首次开始处理 → 完成；记录里只看这个时长（不含排队等待）');
+      buf.writeln('  排队等待 = 创建时间 → 首次开始处理，单独标注，不计入实际处理');
+      buf.writeln('  连着提交多条照片时，后一条要等前一条跑完才开始，这段等待不算处理时间');
+      buf.writeln('  单店耗时/分步耗时 = 该门店这一步自己花的时间');
       buf.writeln('');
       buf.writeln('=== 记录（最新在前） ===');
       for (var i = 0; i < jobs.length; i++) {
@@ -1138,12 +1138,12 @@ class _SettingsPageState extends State<SettingsPage> {
         final now = DateTime.now();
         final started = DateTime.tryParse(job.startedAt ?? '');
         final finished = DateTime.tryParse(job.finishedAt ?? '');
-        final totalMs =
-            job.totalMs ?? now.difference(job.createdAt).inMilliseconds;
         final waitMs = started?.difference(job.createdAt).inMilliseconds;
-        final runMs = (started == null || finished == null)
+        // 只统计「实际处理」：首次开始处理 → 完成（还没完成就按到现在算）。
+        // 排队等待（创建 → 开始）单独标注，不并进这个时间。
+        final runMs = started == null
             ? null
-            : finished.difference(started).inMilliseconds;
+            : (finished ?? now).difference(started).inMilliseconds;
         buf.writeln('');
         buf.writeln('[$i] ${job.type.label} · 条码 ${job.barcode}'
             '${job.productName.isNotEmpty ? ' · ${job.productName}' : ''}');
@@ -1156,9 +1156,8 @@ class _SettingsPageState extends State<SettingsPage> {
         if (finished != null) {
           buf.writeln('    完成: ${_fmtTime(finished)}');
         }
-        buf.writeln('    总耗时: ${_fmtDur(totalMs)}'
-            '${waitMs != null ? ' | 排队等待: ${_fmtDur(waitMs)}' : ' | 排队等待: 旧记录未记录'}'
-            '${runMs != null ? ' | 实际处理: ${_fmtDur(runMs)}' : ''}');
+        buf.writeln('    实际处理: ${runMs == null ? '未开始（还在排队）' : _fmtDur(runMs)}'
+            '${waitMs != null ? '（另有排队等待 ${_fmtDur(waitMs)}，不计入）' : ''}');
         for (final store in job.stores) {
           PhotoStoreResult? r;
           for (final x in job.results) {
@@ -1195,8 +1194,9 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  /// 时长显示：统一用「秒 / 分钟」，不再出现「毫秒」单位
   String _fmtDur(int ms) {
-    if (ms < 1000) return '$ms 毫秒';
+    if (ms <= 0) return '0.0 秒';
     if (ms < 60000) return '${(ms / 1000).toStringAsFixed(1)} 秒';
     return '${(ms / 60000).toStringAsFixed(1)} 分钟';
   }
@@ -1242,7 +1242,7 @@ class _SettingsPageState extends State<SettingsPage> {
       }
       final stepText = r.steps.isEmpty
           ? ''
-          : r.steps.map((s) => '${s.name}${s.ms} 毫秒').join(' → ');
+          : r.steps.map((s) => '${s.name} ${_fmtDur(s.ms)}').join(' → ');
       storeRows.add(Padding(
         padding: const EdgeInsets.only(top: 2),
         child: Text(
@@ -1295,7 +1295,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
       subtitle: Text(
-        '提交 ${_fmtTime(job.createdAt)} · 尝试 ${job.attempts}/${PhotoQueueService.maxAttempts} · 已耗时 ${job.elapsedText}',
+        '提交 ${_fmtTime(job.createdAt)} · 尝试 ${job.attempts}/${PhotoQueueService.maxAttempts} · 用时 ${job.elapsedText}',
         style: const TextStyle(fontSize: 11, color: AppConstants.textSecondary),
       ),
       children: [

@@ -9,6 +9,7 @@ import '../models/stock_history.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'session_manager.dart';
 import 'query_logger.dart';
+import '../utils/image_quality.dart';
 
 /// 条码查询服务
 ///
@@ -3776,45 +3777,11 @@ class QueryService {
         if (findErr != null) return (findErr, null);
       }
       recordStep('查询商品详情');
-      final oldImages = (product?['productimages'] as List?) ?? const <dynamic>[];
 
-      // 4. 删除全部旧图（任一张删除失败则中止，保证替换一致性）
-      for (final item in oldImages) {
-        if (item is! Map<String, dynamic>) continue;
-        final imgId = item['id']?.toString() ?? '';
-        if (imgId.isEmpty || imgId == '0') continue;
-        final delUri = Uri.parse('$baseUrl/Product/DeleteProductImage');
-        final delReq = await _httpClient.postUrl(delUri);
-        delReq.headers.set('User-Agent', _ua);
-        delReq.headers.set('Accept', 'application/json, text/javascript, */*');
-        delReq.headers.set('Referer', '$baseUrl/Product/Manage');
-        delReq.headers.set('Origin', baseUrl);
-        delReq.headers.set('X-Requested-With', 'XMLHttpRequest');
-        delReq.headers.set('Content-Type',
-            'application/x-www-form-urlencoded; charset=UTF-8');
-        delReq.headers.set('Cookie', cookie);
-        delReq.followRedirects = false;
-        delReq.write(_encodeForm({
-          'productImageId': imgId,
-          'forMulColorSize': 'false',
-        }));
-        final delResp = await delReq.close().timeout(const Duration(seconds: 15));
-        if (delResp.statusCode != 200) {
-          return ('删除旧图失败 (HTTP ${delResp.statusCode})', null);
-        }
-        final delBody = await _readBody(delResp);
-        try {
-          final delResult = jsonDecode(delBody) as Map<String, dynamic>;
-          if (delResult['successed'] == false) {
-            return ('删除旧图失败：${delResult['msg'] ?? ''}', null);
-          }
-        } catch (_) {
-          // 响应非 JSON 时按成功处理
-        }
-        recordStep('删除旧图');
-      }
-
-      // 5. 上传新图（独立上传接口，不需要 SaveProduct）
+      // 4. 先上传新图（独立上传接口，不需要 SaveProduct）。
+      //    关键：上传成功并校验通过之前，绝不动旧图 —— 否则上传一旦失败
+      //    （例如多规格商品银豹不接受这次上传），旧图已经被删掉，
+      //    商品照片就变成空白（这就是「补货提交后照片空白」的根因）。
       final uploadUri = Uri.parse(
           '$baseUrl/Product/UploadProductImage?userId=$userId&productId=$pid&forMulColorSize=false');
       final client = HttpClient();
@@ -3885,6 +3852,63 @@ class QueryService {
       if (msg.isEmpty) return ('上传失败：未返回图片路径', null);
       final path = msg.startsWith('/') ? msg : '/$msg';
       final imageUrl = '$_imageDomain$path';
+
+      // 5. 从银豹 CDN 读回刚上传的图做校验：读不回或本身是空白图时，
+      //    下面会跳过删旧图（宁可有旧图，也绝不让商品变成没照片）。
+      final verifyErr = await _verifyUploadedImage(imageUrl);
+      recordStep('校验新图', verifyErr);
+
+      // 6. 重新读商品详情：确认新图已挂上，再删掉其它旧图；
+      //    任何一步不确认就不删，保证商品照片永远不会被清空。
+      if (verifyErr == null) {
+        final rel = _relativeImgPath(imageUrl);
+        final (vErr, latest) = await _findProductData(baseUrl, cookie, pid);
+        if (vErr != null || latest == null) {
+          recordStep('删除旧图',
+              '已跳过（读取商品详情失败，旧图保留）：${vErr ?? '无数据'}');
+        } else {
+          final imgs = (latest['productimages'] as List?) ?? const <dynamic>[];
+          var hasNew = false;
+          for (final item in imgs) {
+            if (item is! Map) continue;
+            final ip = (item['path'] as String?) ?? '';
+            if (rel != null &&
+                ip.isNotEmpty &&
+                (ip.endsWith(rel) || rel.endsWith(ip))) {
+              hasNew = true;
+            }
+          }
+          if (!hasNew) {
+            recordStep('删除旧图', '已跳过（新图还没挂到商品上，旧图保留，稍后由保存步骤挂载）');
+          } else {
+            var failCount = 0;
+            String? firstErr;
+            for (final item in imgs) {
+              if (item is! Map) continue;
+              final ip = (item['path'] as String?) ?? '';
+              if (rel != null &&
+                  ip.isNotEmpty &&
+                  (ip.endsWith(rel) || rel.endsWith(ip))) {
+                continue; // 新图保留
+              }
+              final imgId = item['id']?.toString() ?? '';
+              if (imgId.isEmpty || imgId == '0') continue;
+              final delErr = await _deleteProductImage(baseUrl, cookie, imgId);
+              if (delErr != null) {
+                failCount++;
+                firstErr ??= delErr;
+              }
+            }
+            recordStep(
+                '删除旧图',
+                failCount == 0
+                    ? null
+                    : '部分旧图没删掉（新图已就位，商品不会空白）：$firstErr');
+          }
+        }
+      } else {
+        recordStep('删除旧图', '已跳过（$verifyErr）—— 旧图保留，商品不会变成空白');
+      }
       return (null, imageUrl);
     } catch (e) {
       return ('替换图片异常：${e.toString()}', null);
@@ -4163,6 +4187,89 @@ class QueryService {
     }
   }
 
+  /// 从银豹 CDN 读回刚上传的图片做校验（读不到会短暂重试，等 CDN 生效）。
+  /// 返回 null 表示图片正常；否则返回可读原因（调用方据此保留旧图，宁可多留也不清空）。
+  Future<String?> _verifyUploadedImage(String url) async {
+    if (url.isEmpty) return '上传没有返回图片地址';
+    String? lastErr;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        await Future<void>.delayed(Duration(milliseconds: 700 * attempt));
+      }
+      final err = await _fetchUploadedOnce(url);
+      if (err == null) return null;
+      lastErr = err;
+      // 只有「读不到」值得重试（多半是 CDN 还没生效）；空白/损坏图不用重试
+      if (!err.startsWith('读回校验失败')) return err;
+    }
+    return lastErr;
+  }
+
+  /// 读一次上传后的图片：返回 null 表示正常，否则返回异常原因
+  Future<String?> _fetchUploadedOnce(String url) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final req = await client.getUrl(Uri.parse(url));
+      req.headers.set('User-Agent', _ua);
+      req.followRedirects = true;
+      final resp = await req.close().timeout(const Duration(seconds: 12));
+      if (resp.statusCode != 200) {
+        client.close(force: true);
+        return '读回校验失败 (HTTP ${resp.statusCode})';
+      }
+      final bytes = <int>[];
+      await for (final chunk in resp) {
+        bytes.addAll(chunk);
+      }
+      client.close(force: true);
+      if (bytes.length < 1024) {
+        return '读回校验：图片只有 ${bytes.length} 字节，几乎是空图';
+      }
+      return ImageQuality.blankReason(bytes, label: '上传后的图片');
+    } catch (e) {
+      client.close(force: true);
+      return '读回校验失败：${e.runtimeType}';
+    }
+  }
+
+  /// 删除银豹商品的一张图片；返回 null 表示成功，否则返回失败原因
+  Future<String?> _deleteProductImage(
+      String baseUrl, String cookie, String productImageId) async {
+    try {
+      final delUri = Uri.parse('$baseUrl/Product/DeleteProductImage');
+      final delReq = await _httpClient.postUrl(delUri);
+      delReq.headers.set('User-Agent', _ua);
+      delReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      delReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      delReq.headers.set('Origin', baseUrl);
+      delReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      delReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      delReq.headers.set('Cookie', cookie);
+      delReq.followRedirects = false;
+      delReq.write(_encodeForm({
+        'productImageId': productImageId,
+        'forMulColorSize': 'false',
+      }));
+      final delResp = await delReq.close().timeout(const Duration(seconds: 15));
+      if (delResp.statusCode != 200) {
+        return '删除失败 (HTTP ${delResp.statusCode})';
+      }
+      final delBody = await _readBody(delResp);
+      try {
+        final delResult = jsonDecode(delBody) as Map<String, dynamic>;
+        if (delResult['successed'] == false) {
+          return '删除失败：${delResult['msg'] ?? ''}';
+        }
+      } catch (_) {
+        // 响应非 JSON 时按成功处理
+      }
+      return null;
+    } catch (e) {
+      return '删除异常：${e.toString()}';
+    }
+  }
   /// 从完整图片 URL 提取商品 JSON 里的相对路径（去掉域名与开头斜杠）
   static String? _relativeImgPath(String imageUrl) {
     if (imageUrl.isEmpty) return null;

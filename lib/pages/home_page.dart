@@ -617,7 +617,7 @@ class _HomePageState extends State<HomePage>
         try {
           final imageBytes =
               item.imageBase64.isEmpty ? null : base64Decode(item.imageBase64);
-          final ok = item.type == 'booking'
+          final res = item.type == 'booking'
               ? await service.submitBooking(
                   shopName: item.shopName,
                   phone: item.phone,
@@ -635,7 +635,7 @@ class _HomePageState extends State<HomePage>
                   imageBytes: imageBytes,
                   imageName: item.imageName,
                 );
-          if (ok) {
+          if (res.ok) {
             await OfflineQueueService.instance.removeItem(item.id);
           } else {
             // 服务器在线但补提交仍失败（数据问题等），停止本次，避免重复尝试

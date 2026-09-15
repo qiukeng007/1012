@@ -11,8 +11,18 @@ import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import '../models/store_config.dart';
+import '../utils/image_quality.dart';
 import 'product_image_cache.dart';
 import 'query_service.dart';
+
+/// 照片本身是空白的（整张纯色/无法解析）：直接拒绝入队，
+/// 避免把银豹里原本正常的商品照片覆盖成空白。detail 为可复制的中文取证说明。
+class PhotoBlankException implements Exception {
+  final String detail;
+  PhotoBlankException(this.detail);
+  @override
+  String toString() => detail;
+}
 
 /// 照片任务来源
 enum PhotoJobType { add, restock, sync }
@@ -260,6 +270,11 @@ class PhotoQueueService {
     if (code.isEmpty) throw StateError('条码为空');
     if ((imageBytes == null) == (sourceUrl == null)) {
       throw StateError('必须且只能提供 imageBytes 或 sourceUrl 之一');
+    }
+    // 先自检：空白照片不入队（否则会把银豹里的商品照片覆盖成空白）
+    if (imageBytes != null) {
+      final blank = ImageQuality.blankReason(imageBytes, label: '要提交的照片', strict: false);
+      if (blank != null) throw PhotoBlankException(blank);
     }
 
     // 同商品(条码+uid)合并：丢弃旧任务只跑最新
@@ -686,7 +701,16 @@ class PhotoQueueService {
       try {
         if (await f.exists()) bytes = await f.readAsBytes();
       } catch (_) {}
-      if (bytes == null) resolveErr = '本地图片文件缺失';
+      if (bytes == null) {
+        resolveErr = '本地图片文件缺失';
+      } else {
+        // 兜底：老版本可能已经把空白图排进队列，真正提交前再查一次
+        final blank = ImageQuality.blankReason(bytes, label: '待提交照片', strict: false);
+        if (blank != null) {
+          bytes = null;
+          resolveErr = blank;
+        }
+      }
     } else if (job.sourceUrl != null) {
       bytes = await ProductImageCache.loadBytes(job.sourceUrl!);
       if (bytes == null) resolveErr = '原图下载失败';
@@ -1097,11 +1121,14 @@ class PhotoJob {
     this.totalMs,
   });
 
+  /// 用时 = 「首次开始处理 → 完成」。不含排队等待：
+  /// 连着提交多条时，后一条要等前一条跑完，那段时间不该算在这条头上。
   String get elapsedText {
-    final ms = finishedAt == null
-        ? DateTime.now().difference(createdAt).inMilliseconds
-        : (totalMs ?? 0);
-    if (ms < 1000) return '${ms} 毫秒';
+    final start = DateTime.tryParse(startedAt ?? '');
+    if (start == null) return '等待处理';
+    final end = DateTime.tryParse(finishedAt ?? '') ?? DateTime.now();
+    final ms = end.difference(start).inMilliseconds;
+    if (ms <= 0) return '0.0 秒';
     if (ms < 60000) return '${(ms / 1000).toStringAsFixed(1)} 秒';
     return '${(ms / 60000).toStringAsFixed(1)} 分钟';
   }
