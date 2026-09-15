@@ -1050,7 +1050,7 @@ class PhotoQueueService {
   static List<int> compressForUpload(Uint8List bytes) {
     if (bytes.length < 512 * 1024) return bytes;
     try {
-      final decoded = img.decodeImage(bytes);
+      final decoded = ImageQuality.tryDecode(bytes);
       if (decoded == null) return bytes;
       final img2 = decoded.width >= decoded.height
           ? img.copyResize(decoded, width: 1200)

@@ -20,6 +20,7 @@ import '../services/query_service.dart';
 import '../services/session_manager.dart';
 import '../services/query_logger.dart';
 import '../services/operation_log_service.dart';
+import '../services/restock_log_service.dart';
 import '../services/advanced_settings_service.dart';
 import '../utils/image_quality.dart';
 import 'stock_history_page.dart';
@@ -125,6 +126,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   // 未勾选门店的商品数据（门店名 -> 查到的商品，含“有货但无图”的情况）
   final Map<String, ProductData> _uncheckedStoreProducts = {};
   bool _checkingUncheckedImages = false;
+  /// 商品信息栏条码后面的橙色数字：这个商品有多少个扩展条码（一品多码）。
+  /// 条码 → 条数；_extCountAsked 记已经去查过详情的条码（同一个条码只查一次）
+  final Map<String, int> _extCounts = {};
+  final Set<String> _extCountAsked = {};
+
   /// 当前条码照片是否已同步到全部门店（同步完成后不再自动重复入队）
   bool _imageSyncedToAll = false;
 
@@ -226,6 +232,91 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     setState(() {
       _supplierOverrides[v.barcode] = v.supplier;
     });
+  }
+
+  /// 条码后面的橙色数字：先按列表里的「扩展条码」列显示，再去查一次商品详情核对
+  /// （列表那一列有时只显示第一条，详情里才是完整列表；同一个条码每次启动只查一次）。
+  /// 没有扩展条码就不显示这个数字。
+  void _requestExtCount(ProductData data, String barcode) {
+    final code =
+        data.barcode.trim().isNotEmpty ? data.barcode.trim() : barcode.trim();
+    if (code.isEmpty) return;
+    if (_extCounts.containsKey(code) || _extCountAsked.contains(code)) return;
+    _extCountAsked.add(code);
+    // 列表自带的条数先显示着（详情回来后覆盖成准确的）
+    final fromList = QueryService.extBarcodeCountFromList(data.extBarcodeRaw);
+    if (fromList > 0) _extCounts[code] = fromList;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_loadExtCount(code, data.uid?.toString()));
+    });
+  }
+
+  Future<void> _loadExtCount(String code, String? productUid) async {
+    final store = widget.configs.where((c) => c.enabled).firstOrNull ??
+        widget.configs.firstOrNull;
+    if (store == null) return;
+    try {
+      final (err, _, list) = await widget.queryService
+          .fetchProductExtBarcodes(store, code, productUid: productUid);
+      // 查不到就保留列表里带的条数：这只是个提示，不打扰用户
+      if (err != null || !mounted) return;
+      setState(() => _extCounts[code] = list.length);
+    } catch (_) {}
+  }
+
+  /// 条码后面的橙色小圆圈：这个商品有几个扩展条码（没有就不显示）
+  Widget _extCountBadge(int count) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+      constraints: const BoxConstraints(minWidth: 15),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFF9800),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        count.toString(),
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+            color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold),
+      ),
+    );
+  }
+
+  /// 条码右边那个橙色数字：这个商品有几个扩展条码（没有就不显示）。
+  /// 顺带触发一次核对（同一个条码只查一次详情），数字先按列表里的显示。
+  Widget? _extBarcodeBadge(ProductData data, String fallbackBarcode) {
+    _requestExtCount(data, fallbackBarcode);
+    final code = data.barcode.trim().isNotEmpty
+        ? data.barcode.trim()
+        : fallbackBarcode.trim();
+    final count = _extCounts[code] ?? 0;
+    if (count <= 0) return null;
+    return _extCountBadge(count);
+  }
+
+  /// 拉取「补货提交时间」共享记录（补货服务器 PIC 目录下的公共文件）。
+  /// 用来在补货按钮上显示这个商品上次提交补货的日期：所有手机看到的是同一份。
+  Future<void> _refreshRestockLog() async {
+    try {
+      final raw = await ConfigService.readRestockJson();
+      if (raw == null || raw.isEmpty) return;
+      final cfg =
+          RestockConfig.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+      if (cfg.serverUrl.trim().isEmpty) return;
+      final changed = await RestockLogService.instance.ensureFresh(cfg.serverUrl);
+      if (changed && mounted) setState(() {});
+    } catch (_) {}
+  }
+
+  /// 补货按钮文字：带上这个商品上次提交补货的日期，例：补货（2026.09.14）。
+  /// 没有记录、或者记录还没下载回来时，就是普通的「补货」。
+  String _restockBtnLabel(MultiStoreResult r, ProductData? firstData) {
+    final code = (firstData != null && firstData.barcode.trim().isNotEmpty)
+        ? firstData.barcode.trim()
+        : r.barcode.trim();
+    final date = RestockLogService.instance.lastDate(code);
+    if (date == null || date.isEmpty) return '补货';
+    return '补货（$date）';
   }
 
   /// 从补货配置读取操作员姓名
@@ -576,6 +667,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           }
         }
         unawaited(_refreshPhotoQueuedMark());
+        // 补货按钮上的「上次提交补货日期」：后台拉一下服务器公共记录，拿到后刷新
+        unawaited(_refreshRestockLog());
 
         _restartKeepAliveTimer();
         _checkLoginStatuses();
@@ -1015,7 +1108,14 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
         // 补货 + 打印按钮
         const SizedBox(height: 10),
-        SizedBox(width: double.infinity, child: _actionBtn('补货', Icons.add_shopping_cart, AppConstants.primaryColor, () => _handleRestock(r), enabled: !_dataBusy)),
+        SizedBox(
+            width: double.infinity,
+            child: _actionBtn(
+                _restockBtnLabel(r, firstData),
+                Icons.add_shopping_cart,
+                AppConstants.primaryColor,
+                () => _handleRestock(r),
+                enabled: !_dataBusy)),
         const SizedBox(height: 6),
         Row(children: [
           if (_hasIp('p1')) Expanded(child: _actionBtn('大价签80', Icons.print, const Color(0xFFFF9800), () => _handleDirectPrint(r, 'p1'))),
@@ -1133,6 +1233,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                                 ),
                               )
                             : null,
+                        valueBadge: _extBarcodeBadge(data, barcode),
 ),
                     ],
                   ),
@@ -1752,7 +1853,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   }
 
   Widget _buildInfoRow(IconData icon, String label, String value,
-      {VoidCallback? onTap, Widget? trailing}) {
+      {VoidCallback? onTap, Widget? trailing, Widget? valueBadge}) {
     final row = Row(
       children: [
         Icon(icon, size: 14, color: AppConstants.textSecondary),
@@ -1765,10 +1866,21 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           ),
         ),
         Expanded(
-          child: Text(
-            value,
-            style: const TextStyle(fontSize: 13),
-            overflow: TextOverflow.ellipsis,
+          child: Row(
+            children: [
+              Flexible(
+                child: Text(
+                  value,
+                  style: const TextStyle(fontSize: 13),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              // 值后面的小徽标（如条码后面的扩展条码个数）
+              if (valueBadge != null) ...[
+                const SizedBox(width: 6),
+                valueBadge,
+              ],
+            ],
           ),
         ),
       ],
@@ -1979,6 +2091,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             buyPrice: srcp.buyPrice,
             uid: srcp.uid,
             imageUrl: srcp.imageUrl,
+            extBarcodeRaw: srcp.extBarcodeRaw,
             multipleMatches: srcp.multipleMatches,
             candidates: srcp.candidates,
             rawKeys: srcp.rawKeys,

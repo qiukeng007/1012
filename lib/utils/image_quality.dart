@@ -35,12 +35,7 @@ class ImageQuality {
     bool strict = true,
   }) {
     if (bytes.isEmpty) return unreadableReason(bytes, label: label);
-    img.Image? im;
-    try {
-      im = img.decodeImage(Uint8List.fromList(bytes));
-    } catch (_) {
-      im = null;
-    }
+    final im = tryDecode(bytes);
     if (im == null) {
       if (!strict && looksLikeImage(bytes)) return null;
       return unreadableReason(bytes, label: label);
@@ -66,6 +61,61 @@ class ImageQuality {
       return true;
     }
     return false;
+  }
+
+  /// 解码图片：先按原样解；解不开、但确实是一张 JPEG 时，去掉附加段再解一次。
+  /// 返回 null 表示本机真的解不开（网页/错误页、不支持的格式等）。
+  ///
+  /// 为什么要多试一次：银豹 CDN 上有些图的 EXIF 段本身不标准
+  /// （实测一张 800x800 的商品图，「图像描述」这一项的长度写成了 0），
+  /// 解码库读到这里会直接抛错、放弃整张图——但像素数据是完好的。
+  static img.Image? tryDecode(List<int> bytes) {
+    if (bytes.isEmpty) return null;
+    try {
+      final im = img.decodeImage(Uint8List.fromList(bytes));
+      if (im != null) return im;
+    } catch (_) {}
+    final stripped = stripJpegExtraSegments(bytes);
+    if (stripped == null) return null;
+    try {
+      return img.decodeImage(stripped);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 去掉 JPEG 里跟像素无关的附加段（EXIF/JFIF/注释等 APPn、COM），
+  /// 只留下尺寸表、编码表、扫面数据。不是规范的 JPEG（例如拿到的是网页）
+  /// 返回 null。
+  static Uint8List? stripJpegExtraSegments(List<int> bytes) {
+    if (bytes.length < 4) return null;
+    if (bytes[0] != 0xFF || bytes[1] != 0xD8) return null;
+    final out = <int>[0xFF, 0xD8];
+    var i = 2;
+    while (i + 1 < bytes.length) {
+      if (bytes[i] != 0xFF) return null;
+      final marker = bytes[i + 1];
+      // 没有长度字段的标记：原样照抄
+      if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD9)) {
+        out.addAll(bytes.sublist(i, i + 2));
+        i += 2;
+        continue;
+      }
+      // 扫面数据开始：后面全是要保留的压缩数据
+      if (marker == 0xDA) {
+        out.addAll(bytes.sublist(i));
+        return Uint8List.fromList(out);
+      }
+      if (i + 3 >= bytes.length) return null;
+      final len = (bytes[i + 2] << 8) | bytes[i + 3];
+      if (len < 2 || i + 2 + len > bytes.length) return null;
+      final isApp = marker >= 0xE0 && marker <= 0xEF;
+      if (!isApp && marker != 0xFE) {
+        out.addAll(bytes.sublist(i, i + 2 + len));
+      }
+      i += 2 + len;
+    }
+    return null;
   }
 
   /// 直接对「已经解码好的图片」做空白判断。
@@ -134,11 +184,17 @@ class ImageQuality {
     int skipBelowBytes = 400 * 1024,
   }) {
     if (bytes.isEmpty) return (null, '图片内容为空（0 字节）');
+    // 先按原样解一次：能解开就说明这张图的附加段没问题（不用重编码）
+    var decodedAsIs = true;
     img.Image? im;
     try {
       im = img.decodeImage(Uint8List.fromList(bytes));
     } catch (_) {
       im = null;
+    }
+    if (im == null) {
+      decodedAsIs = false;
+      im = tryDecode(bytes);
     }
     if (im == null) {
       // 文件头是标准图片格式，只是本机解不开（个别机型会这样）：
@@ -152,7 +208,9 @@ class ImageQuality {
       );
     }
     final long = math.max(im.width, im.height);
-    if (bytes.length <= skipBelowBytes && long <= maxSide) {
+    // 「不用重编码」只适用于原样就解开、且已经够小够标准的图；
+    // 靠去掉附加段才解开的（不标准 EXIF），一律重新编码成干净 JPEG 再提交。
+    if (decodedAsIs && bytes.length <= skipBelowBytes && long <= maxSide) {
       return (Uint8List.fromList(bytes), null);
     }
     var out = im;
@@ -167,12 +225,7 @@ class ImageQuality {
   /// 图片概要（取证用），例：'JPEG 1200x1200 185.3KB'
   static String describe(List<int> bytes) {
     final kb = (bytes.length / 1024).toStringAsFixed(1);
-    img.Image? im;
-    try {
-      im = img.decodeImage(Uint8List.fromList(bytes));
-    } catch (_) {
-      im = null;
-    }
+    final im = tryDecode(bytes);
     if (im == null) {
       return '无法解析的图片 $kb KB（前 8 字节 HEX: ${headHex(bytes)}）';
     }

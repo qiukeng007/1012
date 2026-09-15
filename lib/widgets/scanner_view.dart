@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import '../utils/image_quality.dart';
 
 /// 扫码器 — 实时扫码 + 图片导入识别
 
@@ -119,7 +120,7 @@ class _ScannerViewState extends State<ScannerView>
 // 2x2 区域（带 15% 重叠），覆盖图片任意位置的条码
     try {
       final bytes = File(path).readAsBytesSync();
-      final src = img.decodeImage(bytes);
+      final src = ImageQuality.tryDecode(bytes);
       if (src == null) return null;
       const overlap = 0.15;
       final w = src.width;

@@ -235,9 +235,23 @@ class QueryService {
         );
       }
 
-      // 查找匹配条码的商品（精确匹配优先；无精确匹配时用整页结果兜底）
-      final matched = products.where((p) =>
-          p['barcode'] == code || p['barcode']?.trim() == code).toList();
+      // 查找匹配条码的商品（精确匹配优先；无精确匹配时用整页结果兜底）。
+      // 注意：一个条码可能「是 A 的主条码，同时是 B 的扩展条码」（一品多码），
+      // 这种情况两件商品都要列出来；以前只比主条码，会把 B 过滤掉，
+      // 看起来就像「只搜到主条码那一件」。
+      var matched = products.where((p) => rowMatchesCode(p, code)).toList();
+
+      // 有的门店在列表里不写扩展条码（或只显示个图标），上面的对比就匹不出来。
+      // 这种时候（搜的确实是条码、这一页商品也不多）逐行读一次商品详情核对，
+      // 看是谁把这条码当扩展条码用；查失败就当没匹配，不影响正常结果。
+      if (looksLikeBarcode(code) && products.length <= 8) {
+        final others =
+            products.where((p) => !matched.contains(p)).take(5).toList();
+        if (others.isNotEmpty) {
+          final hits = await _rowsUsingExtBarcode(store, others, code);
+          if (hits.isNotEmpty) matched = [...matched, ...hits];
+        }
+      }
 
       final pool = matched.isNotEmpty ? matched : products;
       if (pool.isEmpty) {
@@ -259,6 +273,7 @@ class QueryService {
           uid: raw['uid'],
           productId: raw['productId'],
           imageUrl: raw['imageUrl'] ?? '',
+          extBarcodeRaw: (raw['extBarcode'] ?? '').toString(),
           allColumns: raw['_allColumns'] as String?,
         );
       }).toList();
@@ -2925,6 +2940,92 @@ class QueryService {
       repaired: repaired,
     );
   }
+  /// 商品列表「扩展条码」列里的多个条码拆成一个个。
+  /// 分隔符不确定（可能是逗号/顿号/分号/斜杠/空格），都当分隔符；
+  /// 只保留「长得像条码」的片段，避免把「查看」这类文字当成一个扩展条码。
+  static List<String> extBarcodeTokensFromList(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) return const <String>[];
+    final out = <String>[];
+    void remember(String s) {
+      final v = s.trim();
+      if (v.length < 3 || v.length > 32) return;
+      if (!RegExp(r'^[0-9A-Za-z_\-*]+$').hasMatch(v)) return;
+      if (!out.contains(v)) out.add(v);
+    }
+
+    for (final part in text.split(RegExp(r'[,，、;；|/\s]+'))) {
+      final one = part.trim();
+      if (one.isEmpty) continue;
+      if (RegExp(r'^[0-9A-Za-z_\-*]+$').hasMatch(one)) {
+        remember(one);
+        continue;
+      }
+      // 段里混了别的字（例如「扩展码：69012345」）：把里面的条码抠出来
+      for (final m in RegExp(r'[0-9A-Za-z_\-*]{3,32}').allMatches(one)) {
+        if (RegExp(r'[0-9]').hasMatch(m.group(0)!)) remember(m.group(0)!);
+      }
+    }
+    return out;
+  }
+
+  /// 列表里能看到几个扩展条码（商品信息栏条码后面那个橙色数字）
+  static int extBarcodeCountFromList(String raw) =>
+      extBarcodeTokensFromList(raw).length;
+
+  /// 像条码的输入（数字/字母/_ - *，4~32 位，至少带一个数字）。
+  /// 只有这种输入才值得为了「一品多码」去逐行核对商品详情。
+  static bool looksLikeBarcode(String code) {
+    final v = code.trim();
+    if (v.length < 4 || v.length > 32) return false;
+    if (!RegExp(r'^[0-9A-Za-z_\-*]+$').hasMatch(v)) return false;
+    return RegExp(r'[0-9]').hasMatch(v);
+  }
+
+  /// 这一行商品是不是「这个条码」：主条码相同，或者这个条码是它的扩展条码。
+  static bool rowMatchesCode(Map<String, dynamic> row, String code) {
+    final target = code.trim();
+    if (target.isEmpty) return false;
+    final main = (row['barcode'] ?? '').toString().trim();
+    if (main == target) return true;
+    final ext = (row['extBarcode'] ?? '').toString();
+    if (ext.trim().isEmpty) return false;
+    if (extBarcodeTokensFromList(ext).contains(target)) return true;
+    // 兜底：网页里多个条码可能被拼成一段（没有分隔符），用「前后不是条码字符」
+    // 再确认一次，避免 123 命中 1234。
+    final boundary = RegExp(
+        '(^|[^0-9A-Za-z])' + RegExp.escape(target) + r'([^0-9A-Za-z]|$)');
+    return boundary.hasMatch(ext);
+  }
+
+  /// 这些行里，谁的「扩展条码」正好是 [code]（列表看不出扩展条码时，
+  /// 逐行读一次商品详情核对；失败就当没匹配，不影响别的结果）。
+  Future<List<Map<String, dynamic>>> _rowsUsingExtBarcode(
+    StoreConfig store,
+    List<Map<String, dynamic>> rows,
+    String code,
+  ) async {
+    final checked = await Future.wait(rows.map((row) async {
+      try {
+        final (err, product) = await fetchProductForSync(
+          store,
+          code,
+          productUid: row['uid']?.toString(),
+          productId: row['productId']?.toString(),
+        );
+        if (err != null || product == null) return null;
+        return extBarcodesOf(product).contains(code) ? row : null;
+      } catch (_) {
+        return null;
+      }
+    }));
+    final hits = <Map<String, dynamic>>[];
+    for (final row in checked) {
+      if (row != null) hits.add(row);
+    }
+    return hits;
+  }
+
   /// 扩展条码（一品多码）：读取商品 JSON 里的 productExtBarcodes 数组
   static List<String> extBarcodesOf(Map<String, dynamic> product) {
     final raw = product['productExtBarcodes'];

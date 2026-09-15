@@ -28,6 +28,9 @@ class ProductData {
   /// 商品图片URL
   final String? imageUrl;
 
+  /// 商品列表里「扩展条码」那一列的原文（一品多码可能是多个，用 QueryService 拆） */
+  final String extBarcodeRaw;
+
   /// 多条结果标记
   final int? multipleMatches;
 
@@ -56,6 +59,7 @@ class ProductData {
     this.uid,
     this.productId,
     this.imageUrl,
+    this.extBarcodeRaw = '',
     this.multipleMatches,
     this.candidates,
     this.rawKeys,
@@ -79,6 +83,7 @@ class ProductData {
     dynamic uid,
     String? productId,
     String? imageUrl,
+    String? extBarcodeRaw,
     int? multipleMatches,
     List<ProductData>? candidates,
     String? allColumns,
@@ -96,6 +101,7 @@ class ProductData {
       uid: uid ?? this.uid,
       productId: productId ?? this.productId,
       imageUrl: imageUrl ?? this.imageUrl,
+      extBarcodeRaw: extBarcodeRaw ?? this.extBarcodeRaw,
       multipleMatches: multipleMatches ?? this.multipleMatches,
       candidates: candidates ?? this.candidates,
       rawKeys: rawKeys,

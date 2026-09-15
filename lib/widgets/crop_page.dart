@@ -39,7 +39,7 @@ class _CropPageState extends State<CropPage> {
     }
     if (failReason == null) {
       try {
-        decoded = img.decodeImage(bytes);
+        decoded = ImageQuality.tryDecode(bytes);
       } catch (e) {
         decoded = null;
         failReason = '解码时出错：$e';

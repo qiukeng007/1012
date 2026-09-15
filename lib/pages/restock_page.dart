@@ -12,6 +12,7 @@ import '../services/mode_service.dart';
 import '../services/restock_service.dart';
 import '../services/query_service.dart';
 import '../services/operation_log_service.dart';
+import '../services/restock_log_service.dart';
 import '../services/offline_queue_service.dart';
 import '../services/photo_queue_service.dart';
 import '../utils/constants.dart';
@@ -449,6 +450,26 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     }
   }
 
+  /// 记录「这个条码上次补货时间」到服务器公共文件。
+  /// 失败不阻断补货：只提示一句，完整原因写进操作记录（可复制）。
+  Future<void> _recordRestockTime(String barcode, String store) async {
+    final err = await RestockLogService.instance.record(
+      widget.service.serverUrl,
+      barcode,
+      store: store,
+      operator: widget.service.operatorName.trim(),
+    );
+    if (err == null) return;
+    if (mounted) _showMsg('补货时间记录未更新（补货已提交）');
+    unawaited(OperationLogService.add(
+      store: store,
+      action: '补货时间记录未写入',
+      barcode: barcode,
+      detail: '补货已提交，但服务器上的「补货时间记录」没写进去（不影响补货本身）',
+      errorDetail: err,
+    ));
+  }
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     if (_selectedShop == null || _selectedShop!.isEmpty) {
@@ -542,6 +563,9 @@ class _ReplenishFormState extends State<_ReplenishForm> {
               (supplierErr == null || supplierErr.isEmpty)) {
             widget.onSupplierSynced?.call(submittedBarcode, currentSupplier);
           }
+          // 把这个条码的补货时间写进服务器公共记录（所有手机共享，
+          // 搜索到该商品时补货按钮会显示这个日期）。写失败不影响补货本身。
+          unawaited(_recordRestockTime(submittedBarcode, currentSupplier));
           // 供货商操作记录描述（失败不阻断）；照片操作记录由后台队列写入
           final opName = widget.service.operatorName.trim();
           if (opName.isNotEmpty &&
@@ -1940,7 +1964,7 @@ class _CropPageState extends State<_CropPage> {
     setState(() => _busy = true);
     try {
       final srcBytes = await File(widget.imagePath).readAsBytes();
-      final src = img.decodeImage(srcBytes);
+      final src = ImageQuality.tryDecode(srcBytes);
       if (src == null) { Navigator.pop(context, widget.imagePath); return; }
 
       final sw = MediaQuery.of(context).size.width;
