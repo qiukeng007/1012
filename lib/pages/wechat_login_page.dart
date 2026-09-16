@@ -149,7 +149,8 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     InAppWebViewController c,
     NavigationAction action,
   ) async {
-    final u = action.request.url.toString();
+    final u = action.request.url?.toString() ?? '';
+    if (u.isEmpty) return NavigationActionPolicy.ALLOW;
     // 微信授权/OAuth 中间页必须走 https，http 会被微信拒绝（表现为扫码失败）
     final host = Uri.tryParse(u)?.host ?? '';
     final base = _norm(widget.baseUrl);
@@ -213,6 +214,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     final u = url.toString();
     _pageReady = true;
     setState(() => _loading = false);
+    unawaited(_diag('页面加载完成: $u'));
     if (_isOAuthPage(u)) return;
     if (_isAuthPage(u)) {
       _injectFill();
@@ -483,6 +485,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
         return;
       }
       // 关键：验证会话真实有效，防止二维码登录页的残留 Cookie 被误判为登录成功
+      await _diag('开始校验会话（HTTP GET /Product/Manage）');
       Map<String, dynamic>? report;
       var valid = await StoreSyncService.validateCookie(
         baseUrl: _norm(widget.baseUrl),
@@ -536,6 +539,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
         }
       }
 
+      await _diag('准备保存会话 Cookie（${finalCk.length}字符，门店${stores.length}个）');
       await widget.sessionManager.saveCookie(widget.storeKey, finalCk, via: 'wechat');
       widget.onLoggedIn(finalCk);
       _loggedIn = true;
@@ -598,6 +602,10 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
       );
       await Future.delayed(const Duration(milliseconds: 500));
       if (mounted) Navigator.of(context).pop(true);
+    } catch (e, st) {
+      // 登录流程里的异常在 iOS 上不会弹窗，必须写进日志（可复制）
+      await LoginDiagLogger().logError('微信登录流程', e, st);
+      if (manual) _showError('登录过程出错：$e');
     } finally {
       _loginAttempting = false;
     }
@@ -610,6 +618,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
       String? best;
       int bestLen = 0;
       String bestSource = '';
+      final srcLog = <String>[];
       // 1) CookieManager（插件，iOS 读 WKWebsiteDataStore）
       try {
         final cs = await CookieManager.instance()
@@ -628,6 +637,7 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
             bestLen = ck.length;
             bestSource = 'CookieManager(${cs.length}个)';
           }
+          srcLog.add('CookieManager: ${cs.length}个 / ${ck.length}字符');
         }
       } catch (_) {}
       // 2) iOS 原生通道（直接读 WKWebsiteDataStore）
@@ -637,12 +647,15 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
           final ck = await ch.invokeMethod('getCookies', {
             'url': _norm(widget.baseUrl),
           }) as String?;
+          srcLog.add('iOS原生通道: ${(ck ?? '').length}字符');
           if (ck != null && ck.isNotEmpty && ck.length > bestLen) {
             best = ck;
             bestLen = ck.length;
             bestSource = 'iOS原生通道';
           }
-        } catch (_) {}
+        } catch (e) {
+          srcLog.add('iOS原生通道异常: $e');
+        }
       }
       // 3) document.cookie（不含 HttpOnly，最后手段）；
       //    仅当 WebView 当前页面属于本后台域名时采用，避免把 OAuth 中间页
@@ -657,16 +670,19 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
           if (curUrl.contains(host)) {
             final ck = await _ctrl!.evaluateJavascript(
                 source: 'document.cookie') as String?;
+            srcLog.add('document.cookie: ${(ck ?? '').length}字符');
             if (ck != null && ck.isNotEmpty && ck.length > bestLen) {
               best = ck;
               bestLen = ck.length;
               bestSource = 'document.cookie';
             }
           }
-        } catch (_) {}
+        } catch (e) {
+          srcLog.add('document.cookie异常: $e');
+        }
       }
       if (best != null && best.isNotEmpty) {
-        await _diag('Cookie来源(第${attempt + 1}次): $bestSource，${best.length}字符');
+        await _diag('Cookie来源(第${attempt + 1}次): $bestSource，${best.length}字符（候选: ${srcLog.join(' | ')}）');
         return best;
       }
     }
@@ -674,13 +690,34 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
     return null;
   }
 
+  /// 报错一律用「可选中文字 + 一键复制」的弹窗，
+  /// 不用闪一下就消失的 Toast，避免报错拿不出来
   void _showError(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        backgroundColor: AppConstants.errorColor,
-        duration: const Duration(seconds: 4),
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('登录未完成', style: TextStyle(fontSize: 16)),
+        content: SingleChildScrollView(
+          child: SelectableText(msg, style: const TextStyle(fontSize: 13)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Clipboard.setData(ClipboardData(text: msg)),
+            child: const Text('复制本条'),
+          ),
+          TextButton(
+            onPressed: () async {
+              final text = await LoginDiagLogger().exportText();
+              await Clipboard.setData(ClipboardData(text: text));
+            },
+            child: const Text('复制诊断日志'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
       ),
     );
   }
@@ -775,7 +812,8 @@ window.open=function(u,t,f){if(u&&typeof u==="string"&&u!==""&&u!=="about:blank"
             useShouldOverrideUrlLoading: true,
             javaScriptCanOpenWindowsAutomatically: true,
             supportMultipleWindows: false,
-            useOnLoadResource: true,
+            // 不开 useOnLoadResource：开了会对页面每一个资源（每张商品图）都回调一次，
+            // 商品资料页上千个图片会把小内存的 iPhone 直接打爆（无提示闪退）
             mediaPlaybackRequiresUserGesture: false,
             mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
           ),
