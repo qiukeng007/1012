@@ -61,6 +61,8 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
   bool _loginAttempting = false;
   bool _storesLoaded = false;
   bool _pageReady = false;
+  /// 正在跑的门店提取任务（同一时刻只跑一个，避免并发调用原生 JS）
+  Future<List<PospalSubStore>>? _extractInFlight;
 
   /// Dart 侧会话守护定时器：不依赖页面 JS 轮询，周期性验证登录会话是否已生效
   Timer? _watchTimer;
@@ -372,7 +374,20 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
   /// 2) 宽泛选择器 + 轮询等待（下拉框延迟渲染兜底）
   /// 3) 始终再用 HTTP 抓取一次，与 JS 结果按门店ID合并去重，
   ///    保证即使页面下拉框只渲染了部分门店，也能补齐全量门店
-  Future<List<PospalSubStore>> _extractStores(String cookie) async {
+  /// 门店提取入口：同一时刻只跑一个任务，重复调用直接复用同一个结果
+  /// （登录验证、看门狗、延迟重试都可能同时触发，避免并发调用原生 JS）
+  Future<List<PospalSubStore>> _extractStores(String cookie) {
+    final inflight = _extractInFlight;
+    if (inflight != null) return inflight;
+    final f = _extractStoresInner(cookie);
+    _extractInFlight = f;
+    return f.whenComplete(() {
+      _extractInFlight = null;
+    });
+  }
+
+  /// 实际的门店提取：1) 精确选择器 2) 宽泛选择器轮询 3) HTTP 补全
+  Future<List<PospalSubStore>> _extractStoresInner(String cookie) async {
     final merged = <String, PospalSubStore>{};
     void merge(List<PospalSubStore> list) {
       for (final s in list) {
@@ -402,19 +417,34 @@ class _WechatLoginPageState extends State<WechatLoginPage> {
         await Future.delayed(const Duration(milliseconds: 600));
       }
     }
-    // 2) 宽泛选择器 + 轮询等待
+    // 2) 宽泛选择器 + 轮询等待：每 400ms 取一次，数量连续 3 次一致才算渲染稳定，
+    //    最长约 8 秒。轮询放在 Dart 侧，不用 callAsyncJavaScript
+    //    （该接口在 iOS 原生侧会偶发崩溃，改用多次短调用更稳）。
     try {
-      if (_ctrl != null) {
-        final result = await _ctrl!.callAsyncJavaScript(
-          functionBody: StoreSyncService.jsExtractStoresPoll,
-        ).timeout(const Duration(seconds: 10));
-        final raw = result?.value?.toString() ?? 'null';
-        final stores = StoreSyncService.parseStoresValue(result?.value);
-        await _diag('JS宽泛轮询提取: $raw → ${stores.length}个');
+      var lastCount = -1;
+      var stableCount = 0;
+      final start = DateTime.now();
+      while (mounted && _ctrl != null) {
+        final result = await _ctrl!
+            .evaluateJavascript(source: StoreSyncService.jsExtractStoresBroad)
+            .timeout(const Duration(seconds: 5));
+        final stores = StoreSyncService.parseStoresValue(result);
         if (stores.isNotEmpty) merge(stores);
+        if (stores.length == lastCount) {
+          stableCount++;
+        } else {
+          stableCount = 0;
+          lastCount = stores.length;
+        }
+        if ((stores.isNotEmpty && stableCount >= 3) ||
+            DateTime.now().difference(start).inMilliseconds > 8000) {
+          await _diag('JS宽泛提取: ${merged.length}个');
+          break;
+        }
+        await Future.delayed(const Duration(milliseconds: 400));
       }
     } catch (e) {
-      await _diag('JS宽泛轮询提取异常: $e');
+      await _diag('JS宽泛提取异常: $e');
     }
     // 3) HTTP 提取：始终执行，用于补齐 JS 漏掉的门店
     try {

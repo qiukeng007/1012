@@ -210,7 +210,10 @@ class ImageQuality {
     final long = math.max(im.width, im.height);
     // 「不用重编码」只适用于原样就解开、且已经够小够标准的图；
     // 靠去掉附加段才解开的（不标准 EXIF），一律重新编码成干净 JPEG 再提交。
-    if (decodedAsIs && bytes.length <= skipBelowBytes && long <= maxSide) {
+    if (decodedAsIs &&
+        bytes.length <= skipBelowBytes &&
+        long <= maxSide &&
+        !hasJpegExtraSegments(bytes)) {
       return (Uint8List.fromList(bytes), null);
     }
     var out = im;
@@ -218,8 +221,50 @@ class ImageQuality {
       out = im.width >= im.height
           ? img.copyResize(im, width: maxSide)
           : img.copyResize(im, height: maxSide);
+    } else {
+      // 不缩小也要把 EXIF 旋转方向烘进像素，
+      // 否则重新编码后照片会横过来
+      out = img.bakeOrientation(im);
     }
     return (Uint8List.fromList(img.encodeJpg(out, quality: quality)), null);
+  }
+
+  /// 判断 JPEG 里是否带着跟像素无关的附加段（EXIF、APPn、注释等）。
+  ///
+  /// 为什么要查这个：银豹 CDN 上的商品图经常带不标准的 EXIF 段
+  /// （实测有一张 800x800 的商品图，「图像描述」长度写成 0），
+  /// 直接丢给补货服务器（易语言网页服务）时容易让服务端解图出错。
+  static bool hasJpegExtraSegments(List<int> bytes) {
+    if (bytes.length < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8) {
+      // 不是 JPEG（比如 PNG）：上传时也应该统一转成 JPEG
+      return true;
+    }
+    var i = 2;
+    while (i + 3 < bytes.length) {
+      if (bytes[i] != 0xFF) return true;
+      final marker = bytes[i + 1];
+      if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD9)) {
+        i += 2;
+        continue;
+      }
+      if (marker == 0xDA) return false; // 到了扫描数据，前面都看完了
+      final len = (bytes[i + 2] << 8) | bytes[i + 3];
+      if (len < 2) return true;
+      if (marker == 0xFE) return true; // 注释段
+      if (marker >= 0xE0 && marker <= 0xEF) {
+        // APP0 里只有干净的 JFIF 头算正常
+        final isJfif = marker == 0xE0 &&
+            len >= 7 &&
+            i + 8 < bytes.length &&
+            bytes[i + 4] == 0x4A && // J
+            bytes[i + 5] == 0x46 && // F
+            bytes[i + 6] == 0x49 && // I
+            bytes[i + 7] == 0x46;   // F
+        if (!isJfif) return true;
+      }
+      i += 2 + len;
+    }
+    return false;
   }
 
   /// 图片概要（取证用），例：'JPEG 1200x1200 185.3KB'

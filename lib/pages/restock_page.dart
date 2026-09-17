@@ -826,7 +826,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                   child: TextFormField(
                     controller: _barcodeCtrl,
                     decoration: _inputDecoration(hint: '手动输入或扫码'),
-                    keyboardType: TextInputType.number,
+                    keyboardType: AppConstants.barcodeKeyboard,
                     onChanged: _onBarcodeChanged,
                   ),
                 ),
@@ -1361,7 +1361,7 @@ class _BookingFormState extends State<_BookingForm> {
                   child: TextFormField(
                     controller: _barcodeCtrl,
                     decoration: _inputDecoration(hint: '选填'),
-                    keyboardType: TextInputType.number,
+                    keyboardType: AppConstants.barcodeKeyboard,
                   ),
                 ),
                 const SizedBox(width: 8),

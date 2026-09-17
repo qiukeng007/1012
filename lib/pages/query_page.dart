@@ -2346,7 +2346,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                       controller: _barcodeController,
                       focusNode: _barcodeFocus,
                       enabled: !_dataBusy,
-                      keyboardType: TextInputType.number,
+                      // iOS 数字键盘没有切字母键（打不了商品名称），用通用键盘
+                      keyboardType: AppConstants.barcodeKeyboard,
                       decoration: InputDecoration(
                         hintText: '扫描或输入条码',
                         isDense: true,
@@ -3920,8 +3921,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                             child: TextField(
                               controller: e.value,
                               textInputAction: TextInputAction.next,
-                              // 安卓上点条码输入框默认给数字键盘（条码基本都是数字，也可以扫码/粘贴）
-                              keyboardType: TextInputType.number,
+                              // 安卓上点条码输入框默认给数字键盘（条码基本都是数字，也可以扫码/粘贴）；
+                              // iOS 的数字键盘没有切字母的入口，改用通用键盘
+                              keyboardType: AppConstants.barcodeKeyboard,
                               decoration: InputDecoration(
                                 hintText: '扩展条码',
                                 isDense: true,

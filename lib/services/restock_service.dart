@@ -157,13 +157,22 @@ class RestockService {
       body.addAll(utf8.encode('\r\n'));
     }
 
-    addField('shopname', shopName.replaceAll('&', ''));
-    addField('barcode', barcode.replaceAll('&', ''));
-    addField('quantity', quantity);
-    addField('desc', desc.replaceAll('&', ''));
-    addField('Operators', opName);
-    if (phone != null && phone.isNotEmpty) {
-      addField('phone', phone);
+    // 服务端（易语言网页服务）是按字面比对供货商名的：名字首尾多一个空格/换行，
+    // 或者括号全角半角不一致，「供货商」表就查不到那一行，服务端会直接报内部错误。
+    final sentShop = shopName.replaceAll('&', '').trim();
+    final sentBarcode = barcode.replaceAll('&', '').trim();
+    final sentDesc = desc.replaceAll('&', '').trim();
+    final sentOp = opName.trim();
+    final sentPhone = (phone ?? '').trim();
+    final sentQty = quantity.trim();
+
+    addField('shopname', sentShop);
+    addField('barcode', sentBarcode);
+    addField('quantity', sentQty);
+    addField('desc', sentDesc);
+    addField('Operators', sentOp);
+    if (sentPhone.isNotEmpty) {
+      addField('phone', sentPhone);
     }
     if (uploadBytes != null && uploadBytes.isNotEmpty) {
       body.addAll(utf8.encode('--$boundary\r\n'));
@@ -176,12 +185,12 @@ class RestockService {
     body.addAll(utf8.encode('--$boundary--\r\n'));
 
     final payloadLines = <String>[
-      'shopname=$shopName',
-      'barcode=$barcode',
-      'quantity=$quantity',
-      'desc=$desc',
-      if (phone != null && phone.isNotEmpty) 'phone=$phone',
-      'Operators=$opName',
+      'shopname=$sentShop',
+      'barcode=$sentBarcode',
+      'quantity=$sentQty',
+      'desc=$sentDesc',
+      if (sentPhone.isNotEmpty) 'phone=$sentPhone',
+      'Operators=$sentOp',
       'image=$fileName（$imageInfo）',
     ];
 
@@ -208,6 +217,18 @@ class RestockService {
         buf.writeln('文本：${_decodeBody(b)}');
       }
       if (imageWarn != null) buf.writeln('照片问题：$imageWarn');
+      if (status != null && status != 200) {
+        buf.writeln('—— 结论 ——');
+        buf.writeln('这条报错是补货服务器自己的错误页：服务端执行补货时出了异常，'
+            '手机这边的照片和字段都是正常的。');
+        buf.writeln('最常见原因：服务器的「供货商」表里查不到「$sentShop」这一行'
+            '（名字不一致：首尾多空格、全角括号（）和半角()不同、或者改过名）。');
+        buf.writeln('建议：电脑端补货系统点「一键获取供货商列表」，'
+            '确认里面有没有「$sentShop」；没有就把名字改一致再提交。');
+        if (_decodeBody(b).contains('\uFFFD')) {
+          buf.writeln('（「文本」里的乱码是服务器用 GBK 编码返回造成的，不影响内容）');
+        }
+      }
       return buf.toString().trimRight();
     }
 

@@ -55,6 +55,9 @@ class OperationLog {
 class OperationLogService {
   static const _key = 'operation_logs';
   static const _maxEntries = 200;
+  /// 收藏的记录不参与「满了就淘汰」；
+  /// 收藏最多保留这么多条，避免无限增长
+  static const _maxEntriesKeepFavorites = 300;
 
   /// Append a log entry
   /// 返回该条记录的 id（供异步补全翻译名称等字段用）
@@ -88,7 +91,27 @@ class OperationLogService {
     final raw = prefs.getString(_key) ?? '[]';
     final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
     list.insert(0, entry.toJson());
-    if (list.length > _maxEntries) list.removeRange(_maxEntries, list.length);
+    if (list.length > _maxEntries) {
+      // 收藏的记录不能被新记录挤掉：
+      // 淘汰时优先丢「未收藏」的旧记录，收藏项另有更高上限。
+      final favIds = await getFavoriteIds();
+      final keepIds = <String>{};
+      var normalKept = 0;
+      var favKept = 0;
+      for (final e in list) {
+        final eid = e['id']?.toString() ?? '';
+        if (favIds.contains(eid)) {
+          if (favKept < _maxEntriesKeepFavorites) {
+            favKept++;
+            keepIds.add(eid);
+          }
+        } else if (normalKept < _maxEntries) {
+          normalKept++;
+          keepIds.add(eid);
+        }
+      }
+      list.removeWhere((e) => !keepIds.contains(e['id']?.toString() ?? ''));
+    }
     await prefs.setString(_key, jsonEncode(list));
     return id;
   }

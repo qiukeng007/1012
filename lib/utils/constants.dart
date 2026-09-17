@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 /// 应用常量
@@ -6,6 +7,15 @@ class AppConstants {
   static const String defaultBaseUrl = 'https://beta28.pospal.cn';
   static const int maxStores = 10;
   static const int defaultStoreCount = 1;
+
+  /// 条码类输入框用的键盘：
+  /// 安卓用数字键盘（条码基本都是数字，而且安卓数字键盘自带「切换字母」键）；
+  /// iOS 的 TextInputType.number 会变成纯数字键盘（NumberPad），
+  /// 没有切字母/中文的入口，连商品名称都打不出来，所以 iOS 用通用键盘。
+  static TextInputType get barcodeKeyboard =>
+      defaultTargetPlatform == TargetPlatform.iOS
+          ? TextInputType.text
+          : TextInputType.number;
 
   /// 银豹后台地址归一化：域名一律使用 https。
   /// 微信扫码登录的 OAuth 回调必须走 https，银豹会话也只在 https 下正常下发；

@@ -154,49 +154,34 @@ class StoreSyncService {
   static const String jsExtractStores =
       "JSON.stringify([...document.querySelectorAll('ul[style*=\"width:284px\"] li[optionvalue]')].map(function(li){return{id:li.getAttribute('optionvalue'),name:li.textContent.replace(/&nbsp;/g,' ').trim()};}))";
 
-  /// 宽泛选择器 + 轮询等待的提取脚本（配合 callAsyncJavaScript 使用），
-  /// 兼容下拉框延迟渲染、属性写法差异等情况，最长等待约 8 秒，
-  static const String jsExtractStoresPoll = '''
+  /// 宽泛选择器的门店提取脚本（同步执行，返回门店数组的 JSON 字符串）。
+  /// 兼容下拉框属性写法差异；「等渲染稳定」改由 Dart 侧轮询完成——
+  /// 之前配合 callAsyncJavaScript 在页面里异步轮询，但该接口在 iOS 原生侧
+  /// 会偶发崩溃（EXC_BAD_ACCESS，插件 iOS 源码里也标注了会崩），不再使用。
+  static const String jsExtractStoresBroad = '''
+(function () {
 var selectors = [
   'ul[style*="width:284px"] li[optionvalue]',
   'ul[style*="width: 284px"] li[optionvalue]',
   'ul[style*="width:284px"] li[data-userid]',
   'ul[style*="width: 284px"] li[data-userid]'
 ];
-function extract() {
-  var seen = {};
-  var out = [];
-  for (var s = 0; s < selectors.length; s++) {
-    var nodes = document.querySelectorAll(selectors[s]);
-    for (var i = 0; i < nodes.length; i++) {
-      var li = nodes[i];
-      var id = li.getAttribute('optionvalue') || li.getAttribute('data-userid');
-      if (!id || seen[id]) continue;
-      seen[id] = 1;
-      var name = (li.textContent || '').replace(/&nbsp;/g, ' ').trim();
-      if (!name) name = li.getAttribute('data-name') || '';
-      if (name) out.push({id: id, name: name});
-    }
+var seen = {};
+var out = [];
+for (var s = 0; s < selectors.length; s++) {
+  var nodes = document.querySelectorAll(selectors[s]);
+  for (var i = 0; i < nodes.length; i++) {
+    var li = nodes[i];
+    var id = li.getAttribute('optionvalue') || li.getAttribute('data-userid');
+    if (!id || seen[id]) continue;
+    seen[id] = 1;
+    var name = (li.textContent || '').replace(/&nbsp;/g, ' ').trim();
+    if (!name) name = li.getAttribute('data-name') || '';
+    if (name) out.push({id: id, name: name});
   }
-  return out;
 }
-var start = Date.now();
-var lastCount = -1;
-var stableCount = 0;
-while (true) {
-  var list = extract();
-  if (list.length === lastCount) {
-    stableCount++;
-  } else {
-    stableCount = 0;
-    lastCount = list.length;
-  }
-  // 门店数量连续 3 次一致才认为渲染完成（避免只渲染一半就返回）
-  if ((list.length > 0 && stableCount >= 3) || Date.now() - start > 8000) {
-    return JSON.stringify(list);
-  }
-  await new Promise(function (r) { setTimeout(r, 400); });
-}
+return JSON.stringify(out);
+})();
 ''';
 
   /// 解析 JS 提取返回值（兼容 String/List 两种格式）
