@@ -899,7 +899,8 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                         controller: _qtyCtrl,
                         focusNode: _qtyFocus,
                         decoration: _inputDecoration(),
-                        keyboardType: TextInputType.text,
+                        // 默认数字键盘，但要能切字母/中文
+                        keyboardType: AppConstants.numberKeyboard(),
                         onTap: () {
                           // 先收起当前键盘，再弹出输入键盘
                           FocusScope.of(context).unfocus();
@@ -1400,7 +1401,8 @@ class _BookingFormState extends State<_BookingForm> {
                       TextFormField(
                         controller: _qtyCtrl,
                         decoration: _inputDecoration(),
-                        keyboardType: TextInputType.text,
+                        // 默认数字键盘，但要能切字母/中文
+                        keyboardType: AppConstants.numberKeyboard(),
                         validator: (v) {
                           if (v == null || v.trim().isEmpty) return '必填';
                           return null;
