@@ -281,11 +281,44 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     if (data.productName.isNotEmpty && _descCtrl.text.isEmpty) {
       _descCtrl.text = data.productName;
     }
-    // 查询结果有图片时自动下载填入图片框（保留重新上传）
-    if (data.imageUrl != null && data.imageUrl!.isNotEmpty) {
+    // 队列里还没传完的新照片优先：直接用这张发补货，不用等队列先同步到银豹
+    final localBytes = data.imageBytes;
+    if (localBytes != null && localBytes.isNotEmpty) {
+      // 这张照片已经在后台队列里同步银豹了，不能当成「用户新拍的照片」再排一次队
+      _imageFromUser = false;
+      unawaited(_useLocalPrefillImage(localBytes, data.imageUrl));
+    } else if (data.imageUrl != null && data.imageUrl!.isNotEmpty) {
+      // 查询结果有图片时自动下载填入图片框（保留重新上传）
       // 预填图片来自银豹，标记为非手动上传（除非用户之后重新上传）
       _imageFromUser = false;
       _downloadPrefillImage(data.imageUrl!);
+    }
+  }
+
+  /// 直接用队列里那张刚提交的照片填进图片框。
+  /// 不重新下载银豹上的旧图，也不重复入队（银豹那边队列已经在传了）。
+  Future<void> _useLocalPrefillImage(
+      List<int> bytes, String? fallbackUrl) async {
+    final blank = ImageQuality.blankReason(bytes, label: '刚提交的照片');
+    if (blank != null) {
+      // 本地这张不能用就退回银豹上的图（有的话）
+      if (fallbackUrl != null && fallbackUrl.isNotEmpty) {
+        _downloadPrefillImage(fallbackUrl);
+      } else if (mounted) {
+        _showMsg('刚提交的照片不可用，请重新拍照');
+      }
+      return;
+    }
+    final (normalized, _) = ImageQuality.normalizeForUpload(bytes);
+    final use = normalized ?? bytes;
+    try {
+      final out = File(
+          '${Directory.systemTemp.path}/prefill_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      await out.writeAsBytes(use, flush: true);
+      if (!mounted) return;
+      setState(() => _imageFile = out);
+    } catch (e) {
+      if (mounted) _showMsg('照片写入失败：$e');
     }
   }
 

@@ -202,6 +202,8 @@ class PhotoQueueService {
       StreamController<PhotoJobEvent>.broadcast();
   QueryService? _queryService;
   bool _pumping = false;
+  /// 最近一次「泵」里任务抛出意外错误的原因（正常为 null，排查用）
+  String? _lastPumpError;
   int _pendingCount = 0;
   int _seq = 0;
   /// 当前是否有任务正在上传（驱动首页“运行中”转圈动画）
@@ -214,6 +216,7 @@ class PhotoQueueService {
   Stream<PhotoJobEvent> get events => _events.stream;
   int get pendingCount => _pendingCount;
   bool get isProcessingActive => _processingActive;
+  String? get lastPumpError => _lastPumpError;
 
   void addListener(void Function() l) => _notifier.addListener(l);
   void removeListener(void Function() l) => _notifier.removeListener(l);
@@ -355,6 +358,34 @@ class PhotoQueueService {
         !j.status.isFinished);
   }
 
+  /// 队列里这个商品还没同步完的照片（本地文件的字节）。
+  ///
+  /// 用途一：用户在查询页刚提交了照片，队列可能要等很久才轮到它，
+  /// 查询页把这张照片先显示出来，不用干等队列跑完。
+  /// 用途二：提交补货时优先用这张照片发补货，不必等队列先同步到银豹。
+  Future<Uint8List?> queuedImageBytes(
+      String barcode, String? productUid) async {
+    final code = barcode.trim();
+    if (code.isEmpty) return null;
+    try {
+      final jobs = await _loadQueue();
+      for (final j in jobs) {
+        if (j.status.isFinished) continue;
+        if (j.barcode != code) continue;
+        if ((j.productUid ?? '') != (productUid ?? '')) continue;
+        final name = j.imageFile;
+        if (name == null || name.isEmpty) continue;
+        final f = File(
+            '${(await _imgDir()).path}${Platform.pathSeparator}$name');
+        if (!await f.exists()) continue;
+        final bytes = await f.readAsBytes();
+        if (bytes.isEmpty) continue;
+        return bytes;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   /// 队列 + 历史（时间倒序），供配置页展示
   Future<List<PhotoJob>> allJobs() async {
     final q = await _loadQueue();
@@ -427,69 +458,106 @@ class PhotoQueueService {
 
   Future<void> _pumpLoop() async {
     while (_pumping) {
-      final qs = _queryService;
-      if (qs == null) break;
-      final jobs = await _loadQueue();
-      if (jobs.isEmpty) break;
+      // 一条任务出意外（网络库异常、文件坏了等）不能让整条队列停摆：
+      // 记下原因、按一次失败计次退避，然后继续跑下一条。
+      // 以前这里没兜底，一条任务抛异常整条队列就停到下次提交照片为止。
+      String? runningId;
+      try {
+        final qs = _queryService;
+        if (qs == null) break;
+        final jobs = await _loadQueue();
+        if (jobs.isEmpty) break;
 
-      // 崩溃/杀进程恢复：处理中被中断的任务回到排队重跑；已被取代的收尾归档
-      for (final j in jobs) {
-        if (j.superseded) {
-          await _finishSuperseded(j);
-        } else if (j.status == PhotoJobStatus.processing) {
-          j.status = PhotoJobStatus.pending;
-          j.nextAttemptAt = 0;
-          await _saveQueueJob(j);
-        }
-      }
-
-      final nowMs = DateTime.now().millisecondsSinceEpoch;
-      PhotoJob? todo;
-      int? soonest;
-      for (final j in jobs) {
-        if (j.status == PhotoJobStatus.pending && j.nextAttemptAt <= nowMs) {
-          todo = j;
-          break;
-        }
-        if (j.status == PhotoJobStatus.pending && j.nextAttemptAt > nowMs) {
-          if (soonest == null || j.nextAttemptAt < soonest) {
-            soonest = j.nextAttemptAt;
+        // 崩溃/杀进程恢复：处理中被中断的任务回到排队重跑；已被取代的收尾归档
+        for (final j in jobs) {
+          if (j.superseded) {
+            await _finishSuperseded(j);
+          } else if (j.status == PhotoJobStatus.processing) {
+            j.status = PhotoJobStatus.pending;
+            j.nextAttemptAt = 0;
+            await _saveQueueJob(j);
           }
         }
-      }
 
-      if (todo == null) {
-        // 无待办：可能在退避，也可能在等待登录（Cookie 恢复后自动转回排队）
-        var anyWaiting = false;
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        PhotoJob? todo;
+        int? soonest;
         for (final j in jobs) {
-          if (j.status != PhotoJobStatus.waitingLogin) continue;
-          anyWaiting = true;
-          for (final s in j.stores) {
-            if (await qs.hasSessionCookie(s)) {
-              j.status = PhotoJobStatus.pending;
-              j.nextAttemptAt = 0;
-              await _saveQueueJob(j);
-              todo = j;
-              break;
+          if (j.status == PhotoJobStatus.pending && j.nextAttemptAt <= nowMs) {
+            todo = j;
+            break;
+          }
+          if (j.status == PhotoJobStatus.pending && j.nextAttemptAt > nowMs) {
+            if (soonest == null || j.nextAttemptAt < soonest) {
+              soonest = j.nextAttemptAt;
             }
           }
-          if (todo != null) break;
         }
-        if (todo == null) {
-          final waitMs = soonest != null
-              ? (soonest - nowMs).clamp(1000, 20000)
-              : (anyWaiting ? 20000 : 5000);
-          await Future<void>.delayed(
-              Duration(milliseconds: (waitMs as num).toInt()));
-          continue;
-        }
-      }
 
-      final fresh = await _loadQueueJob(todo.id);
-      if (fresh == null) continue; // 文件已被删除（合并/删除）
-      if (fresh.superseded) _cancelledIds.add(fresh.id);
-      await _processJob(qs, fresh);
+        if (todo == null) {
+          // 无待办：可能在退避，也可能在等待登录（Cookie 恢复后自动转回排队）
+          var anyWaiting = false;
+          for (final j in jobs) {
+            if (j.status != PhotoJobStatus.waitingLogin) continue;
+            anyWaiting = true;
+            for (final s in j.stores) {
+              if (await qs.hasSessionCookie(s)) {
+                j.status = PhotoJobStatus.pending;
+                j.nextAttemptAt = 0;
+                await _saveQueueJob(j);
+                todo = j;
+                break;
+              }
+            }
+            if (todo != null) break;
+          }
+          if (todo == null) {
+            final waitMs = soonest != null
+                ? (soonest - nowMs).clamp(1000, 20000)
+                : (anyWaiting ? 20000 : 5000);
+            await Future<void>.delayed(
+                Duration(milliseconds: (waitMs as num).toInt()));
+            continue;
+          }
+        }
+
+        runningId = todo.id;
+        final fresh = await _loadQueueJob(todo.id);
+        if (fresh == null) continue; // 文件已被删除（合并/删除）
+        if (fresh.superseded) _cancelledIds.add(fresh.id);
+        await _processJob(qs, fresh);
+        runningId = null;
+      } catch (e) {
+        _lastPumpError = e.toString();
+        final id = runningId;
+        if (id != null) await _failUnexpected(id, e);
+        await Future<void>.delayed(const Duration(seconds: 3));
+      }
     }
+  }
+
+  /// 任务处理过程中抛出意料之外的错误：计一次失败并安排退避重试。
+  /// 既避免这条任务被无限快速重跑，也避免整条队列被它拖死。
+  Future<void> _failUnexpected(String jobId, Object e) async {
+    try {
+      final j = await _loadQueueJob(jobId);
+      if (j == null || j.status.isFinished) return;
+      j.attempts++;
+      j.lastError = _short('任务处理异常：$e');
+      if (j.attempts >= maxAttempts) {
+        final anyOk = j.results.any((r) => r.status == 'success');
+        await _finalize(
+            j, anyOk ? PhotoJobStatus.partial : PhotoJobStatus.failed);
+        return;
+      }
+      j.status = PhotoJobStatus.pending;
+      final idx = (j.attempts - 1).clamp(0, _backoffMs.length - 1);
+      j.nextAttemptAt = DateTime.now().millisecondsSinceEpoch +
+          _backoffMs[(idx as num).toInt()];
+      await _saveQueueJob(j);
+      await refreshCount();
+      _notify();
+    } catch (_) {}
   }
 
   /// 官方同步执行器：总账号(带门店ID)任务优先走银豹 SyncUpdateProductToStores，
@@ -785,6 +853,10 @@ class PhotoQueueService {
       return;
     }
 
+    // 记下这次失败的原因：重试成功后门店结果会被覆盖，不记就永远查不出为什么重试
+    final failSummary = _failureSummary(job, storeResults);
+    if (failSummary.isNotEmpty) job.lastError = failSummary;
+
     if (realRun) job.attempts++;
 
     if (job.attempts >= maxAttempts) {
@@ -802,6 +874,29 @@ class PhotoQueueService {
     await _saveQueueJob(job);
     await refreshCount();
     _notify();
+  }
+
+  /// 把这次失败的门店原因汇总成一行（写进任务，重试成功后也能看到为什么重试过）
+  static String _failureSummary(
+      PhotoJob job, List<PhotoStoreResult> results) {
+    final parts = <String>[];
+    for (final s in job.stores) {
+      for (final r in results) {
+        if (r.storeKey != s.storeKey) continue;
+        if (r.status == 'success') break;
+        final why = _short(r.error ?? r.statusText);
+        parts.add('${r.storeName}：${why.isEmpty ? r.statusText : why}');
+        break;
+      }
+    }
+    return _short(parts.join('；'));
+  }
+
+  /// 报错文本压成一行并限长，避免日志被超长的 HttpException 撑爆
+  static String _short(String s, [int max = 300]) {
+    var t = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (t.length > max) t = '${t.substring(0, max)}…';
+    return t;
   }
 
   Future<PhotoStoreResult> _runStore(
@@ -1096,6 +1191,8 @@ class PhotoJob {
   String? startedAt;
   String? finishedAt;
   int? totalMs;
+  /// 上一次尝试失败的原因（重试成功/最终成功也会留着，方便查「为什么重试过」）
+  String? lastError;
 
   PhotoJob({
     required this.id,
@@ -1119,15 +1216,31 @@ class PhotoJob {
     this.startedAt,
     this.finishedAt,
     this.totalMs,
+    this.lastError,
   });
 
-  /// 用时 = 「首次开始处理 → 完成」。不含排队等待：
-  /// 连着提交多条时，后一条要等前一条跑完，那段时间不该算在这条头上。
+  /// 真正干活的时间 = 各门店耗时之和。
+  /// 不含重试退避、也不含 App 被系统挂起的那段——
+  /// 以前用「首次开始处理 → 完成」，这两段会被算进去，
+  /// 出现「各店加起来 26 秒、日志显示 64 分钟」这种虚高。
+  int get workMs => results.fold<int>(0, (sum, r) => sum + r.wallMs);
+
+  /// 展示用耗时：跑完的显示真实干活时间；没跑完的直接说明当前状态，
+  /// 不再显示一个一直往上涨的数字（看着像卡死）。
   String get elapsedText {
-    final start = DateTime.tryParse(startedAt ?? '');
-    if (start == null) return '等待处理';
-    final end = DateTime.tryParse(finishedAt ?? '') ?? DateTime.now();
-    final ms = end.difference(start).inMilliseconds;
+    if (finishedAt == null) {
+      if (status == PhotoJobStatus.waitingLogin) return '等待登录';
+      if (attempts > 0) return '第 $attempts 次失败，等重试';
+      return '等待处理';
+    }
+    var ms = workMs;
+    if (ms <= 0) {
+      final start = DateTime.tryParse(startedAt ?? '');
+      final end = DateTime.tryParse(finishedAt ?? '');
+      if (start != null && end != null) {
+        ms = end.difference(start).inMilliseconds;
+      }
+    }
     if (ms <= 0) return '0.0 秒';
     if (ms < 60000) return '${(ms / 1000).toStringAsFixed(1)} 秒';
     return '${(ms / 60000).toStringAsFixed(1)} 分钟';
@@ -1160,6 +1273,7 @@ class PhotoJob {
         'startedAt': startedAt,
         'finishedAt': finishedAt,
         'totalMs': totalMs,
+        'lastError': lastError,
       };
 
   factory PhotoJob.fromJson(Map<String, dynamic> json) => PhotoJob(
@@ -1197,5 +1311,6 @@ class PhotoJob {
         startedAt: json['startedAt'] as String?,
         finishedAt: json['finishedAt'] as String?,
         totalMs: (json['totalMs'] as num?)?.toInt(),
+        lastError: json['lastError'] as String?,
       );
 }

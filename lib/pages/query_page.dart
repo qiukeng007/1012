@@ -118,6 +118,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   /// 当前展示商品的照片是否已提交后台队列（处理完前显示“已提交”角标）
   bool _photoQueuedMark = false;
 
+  /// 队列里还没传完的新照片（条码 → 本地字节）。
+  /// 刚提交的照片先显示在图片框里，不用干等队列跑完；
+  /// 队列跑完后本地文件没了，自动换回服务器上的新图。
+  final Map<String, Uint8List> _localPhotoBytes = {};
+
   /// 供货商/商品名称等数据同步中：不遮全屏，仅禁用扫码/补货（打印不受影响）
   bool _syncingProductData = false;
 
@@ -174,6 +179,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     _photoQueueSub = PhotoQueueService.instance.events.listen(_onPhotoQueueEvent);
     widget.imageUpdateNotifier?.addListener(_handleRestockImageUpdate);
     widget.supplierUpdateNotifier?.addListener(_handleRestockSupplierUpdate);
+    RestockLogService.instance.revision.addListener(_onRestockLogChanged);
     _loadOperatorName();
     _checkLoginStatuses();
     _startKeepAlive();
@@ -191,6 +197,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     final curBarcode = _lastResult?.barcode;
     if (curBarcode != null && e.barcode == curBarcode) {
       unawaited(_refreshPhotoQueuedMark());
+    }
+    if (curBarcode != null && e.barcode == curBarcode) {
+      _refreshLocalPhotoForCurrent();
     }
     final isWatch = e.barcode == _queueWatchBarcode &&
         (_queueWatchUid == null ||
@@ -232,6 +241,12 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     setState(() {
       _supplierOverrides[v.barcode] = v.supplier;
     });
+  }
+
+  /// 补货时间记录变了（刚提交完补货 / 重新下载完）：立刻刷新按钮上的日期，
+  /// 不用等 3 分钟缓存过期，切回查询页也能马上看到最新的补货时间。
+  void _onRestockLogChanged() {
+    if (mounted) setState(() {});
   }
 
   /// 条码后面的橙色数字：先按列表里的「扩展条码」列显示，再去查一次商品详情核对
@@ -455,6 +470,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     _photoQueueSub?.cancel();
     widget.imageUpdateNotifier?.removeListener(_handleRestockImageUpdate);
     widget.supplierUpdateNotifier?.removeListener(_handleRestockSupplierUpdate);
+    RestockLogService.instance.revision.removeListener(_onRestockLogChanged);
     AdvancedSettingsService.instance.removeListener(_onAdvancedSettingsChanged);
     _barcodeController.dispose();
     _barcodeFocus.dispose();
@@ -484,6 +500,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     _barcodeFocus.unfocus(); // 收起键盘
     _cancelTransfer(); // 新搜索清空调货状态
     _productImageOverrides.clear(); // 新搜索清空图片缓存，展示服务器最新图片
+    _localPhotoBytes.clear(); // 本地队列照片也一起清，避免串到别的商品
 
     setState(() {
       _querying = true;
@@ -667,6 +684,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           }
         }
         unawaited(_refreshPhotoQueuedMark());
+        // 队列里还有这个商品刚提交、没传完的照片：先把本地这张显示出来
+        _refreshLocalPhotoForCurrent();
         // 补货按钮上的「上次提交补货日期」：后台拉一下服务器公共记录，拿到后刷新
         unawaited(_refreshRestockLog());
 
@@ -819,6 +838,40 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     }
   }
 
+  /// 把队列里这个商品还没传完的照片读出来，先显示在图片框里。
+  /// 读不到（队列跑完了 / 不是这个商品）就把本地缓存清掉，换回服务器上的图。
+  Future<void> _refreshLocalPhoto(String barcode, String? productUid) async {
+    final code = barcode.trim();
+    if (code.isEmpty) return;
+    Uint8List? bytes;
+    try {
+      bytes = await PhotoQueueService.instance.queuedImageBytes(code, productUid);
+    } catch (_) {
+      bytes = null;
+    }
+    if (!mounted) return;
+    final old = _localPhotoBytes[code];
+    if (bytes == null) {
+      if (old == null) return;
+      setState(() => _localPhotoBytes.remove(code));
+      return;
+    }
+    if (old != null && old.length == bytes.length) return;
+    final fresh = bytes;
+    setState(() => _localPhotoBytes[code] = fresh);
+  }
+
+  /// 当前展示的商品：按商品的完整条码去队列里找那张还没传完的照片
+  void _refreshLocalPhotoForCurrent() {
+    final r = _lastResult;
+    if (r == null) return;
+    final prod = _currentProductData(r);
+    final code = (prod != null && prod.barcode.trim().isNotEmpty)
+        ? prod.barcode.trim()
+        : r.barcode.trim();
+    if (code.isEmpty) return;
+    unawaited(_refreshLocalPhoto(code, prod?.uid?.toString()));
+  }
   /// 刷新“照片已提交队列”标记：当前商品在后台队列中还有未完成的任务即显示
   Future<void> _refreshPhotoQueuedMark() async {
     final r = _lastResult;
@@ -1366,13 +1419,24 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     );
   }
 
+  /// 图片相关一律按「商品的完整条码」存取：
+  /// 用户可能按名称搜索、或只输了条码前几位，不能直接用搜索框里的内容当键。
+  String _photoKey(ProductData data, String fallbackBarcode) {
+    final code = data.barcode.trim();
+    return code.isNotEmpty ? code : fallbackBarcode.trim();
+  }
+
   Widget _buildProductImageBox(ProductData data, String barcode,
       String? sourceStoreName) {
-    final overrideUrl = _productImageOverrides[barcode];
+    final key = _photoKey(data, barcode);
+    final overrideUrl = _productImageOverrides[key];
     final imageUrl = overrideUrl ?? data.imageUrl;
-    final hasImage = imageUrl != null &&
-        imageUrl.isNotEmpty &&
-        !imageUrl.contains('default_200x200');
+    final localBytes = _localPhotoBytes[key];
+    final hasLocal = localBytes != null && localBytes.isNotEmpty;
+    final hasImage = hasLocal ||
+        (imageUrl != null &&
+            imageUrl.isNotEmpty &&
+            !imageUrl.contains('default_200x200'));
     return GestureDetector(
       onTap: hasImage
           ? () => _showProductImagePreview(data, barcode, sourceStoreName)
@@ -1417,14 +1481,24 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                           ],
                         ),
                       )
-                    : hasImage
-                        ? _CachedImage(
-                            url: imageUrl!,
+                    : hasLocal
+                        ? Image.memory(
+                            localBytes,
                             width: 70,
                             height: 70,
-                            decodeWidth: 140,
-                            decodeHeight: 140,
+                            fit: BoxFit.cover,
+                            gaplessPlayback: true,
+                            cacheWidth: 140,
+                            cacheHeight: 140,
                           )
+                        : hasImage
+                            ? _CachedImage(
+                                url: imageUrl!,
+                                width: 70,
+                                height: 70,
+                                decodeWidth: 140,
+                                decodeHeight: 140,
+                              )
                         : Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
@@ -1564,6 +1638,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       if (!mounted) return;
       _showBanner(
           '照片已加入队列，自动同步 ${job.stores.length} 个门店');
+      unawaited(_refreshLocalPhoto(code, data.uid?.toString()));
     } on PhotoBlankException catch (e) {
       if (mounted) _showCopyableError('照片是空白的，已停止上传', e.detail);
     } catch (e) {
@@ -1595,8 +1670,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
   void _showProductImagePreview(ProductData data, String barcode,
       String? sourceStoreName) {
-    final url = _productImageOverrides[barcode] ?? data.imageUrl ?? '';
-    if (url.isEmpty) return;
+    final key = _photoKey(data, barcode);
+    final url = _productImageOverrides[key] ?? data.imageUrl ?? '';
+    final localBytes = _localPhotoBytes[key];
+    final hasLocal = localBytes != null && localBytes.isNotEmpty;
+    if (url.isEmpty && !hasLocal) return;
     // 预览加载原图（去掉 _200x200 缩略图后缀），走缓存优先组件
     final full = url.startsWith('http') ? url : 'https://img.pospal.cn$url';
     final original = full.replaceAll('_200x200', '');
@@ -1635,13 +1713,19 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                         padding: EdgeInsets.only(top: topGap, bottom: 8),
                         child: InteractiveViewer(
                           maxScale: 5,
-                          child: _CachedImage(
-                            url: original,
-                            fit: BoxFit.contain,
-                            radius: 0,
-                            placeholder: const Icon(Icons.broken_image,
-                                size: 64, color: Colors.white70),
-                          ),
+                          child: hasLocal
+                              ? Image.memory(
+                                  localBytes,
+                                  fit: BoxFit.contain,
+                                  gaplessPlayback: true,
+                                )
+                              : _CachedImage(
+                                  url: original,
+                                  fit: BoxFit.contain,
+                                  radius: 0,
+                                  placeholder: const Icon(Icons.broken_image,
+                                      size: 64, color: Colors.white70),
+                                ),
                         ),
                       ),
                     ),
@@ -2291,6 +2375,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         buyPrice: firstData?.buyPrice,
         sellPrice: firstData?.sellPrice,
         imageUrl: prefillImageUrl,
+        // 队列里刚提交、还没传完的照片：补货直接用这张发，不用等队列
+        imageBytes: _localPhotoBytes[barcode],
         uid: firstData?.uid?.toString(),
       ));
     }

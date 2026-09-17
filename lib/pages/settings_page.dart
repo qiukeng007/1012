@@ -1127,23 +1127,23 @@ class _SettingsPageState extends State<SettingsPage> {
           '记录数: ${jobs.length} 条（配置页保留最近 ${PhotoQueueService.historyCap} 条）');
       buf.writeln('');
       buf.writeln('说明（字段口径）:');
-      buf.writeln('  实际处理 = 首次开始处理 → 完成；记录里只看这个时长（不含排队等待）');
+      buf.writeln('  实际处理 = 各门店耗时之和（真正干活的时间）');
       buf.writeln('  排队等待 = 创建时间 → 首次开始处理，单独标注，不计入实际处理');
-      buf.writeln('  连着提交多条照片时，后一条要等前一条跑完才开始，这段等待不算处理时间');
+      buf.writeln('  重试退避、App 被系统挂起的时间都不算进实际处理（以前会算，导致虚高）');
+      buf.writeln('  没跑完的任务不显示时长，直接写当前状态（等重试 / 等待登录）');
+      buf.writeln('  上次失败 = 这条上一次尝试失败的原因（重试成功后也能看到为什么重试过）');
       buf.writeln('  单店耗时/分步耗时 = 该门店这一步自己花的时间');
       buf.writeln('');
       buf.writeln('=== 记录（最新在前） ===');
       for (var i = 0; i < jobs.length; i++) {
         final job = jobs[i];
-        final now = DateTime.now();
         final started = DateTime.tryParse(job.startedAt ?? '');
         final finished = DateTime.tryParse(job.finishedAt ?? '');
         final waitMs = started?.difference(job.createdAt).inMilliseconds;
-        // 只统计「实际处理」：首次开始处理 → 完成（还没完成就按到现在算）。
-        // 排队等待（创建 → 开始）单独标注，不并进这个时间。
-        final runMs = started == null
-            ? null
-            : (finished ?? now).difference(started).inMilliseconds;
+        // 实际处理 = 各门店耗时之和（job.elapsedText 里算）。
+        // 不再用「首次开始处理 → 完成」：那会把重试退避、App 被挂起的
+        // 时间也算进去，出现「各店合计 26 秒、日志显示 64 分钟」的虚高。
+        final runText = job.elapsedText;
         buf.writeln('');
         buf.writeln('[$i] ${job.type.label} · 条码 ${job.barcode}'
             '${job.productName.isNotEmpty ? ' · ${job.productName}' : ''}');
@@ -1156,8 +1156,11 @@ class _SettingsPageState extends State<SettingsPage> {
         if (finished != null) {
           buf.writeln('    完成: ${_fmtTime(finished)}');
         }
-        buf.writeln('    实际处理: ${runMs == null ? '未开始（还在排队）' : _fmtDur(runMs)}'
-            '${waitMs != null ? '（另有排队等待 ${_fmtDur(waitMs)}，不计入）' : ''}');
+        buf.writeln('    实际处理: $runText'
+            '${waitMs != null && waitMs > 0 ? '（另有排队等待 ${_fmtDur(waitMs)}，不计入）' : ''}');
+        if ((job.lastError ?? '').isNotEmpty) {
+          buf.writeln('    上次失败: ${job.lastError}');
+        }
         for (final store in job.stores) {
           PhotoStoreResult? r;
           for (final x in job.results) {
@@ -1295,7 +1298,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
       subtitle: Text(
-        '提交 ${_fmtTime(job.createdAt)} · 尝试 ${job.attempts}/${PhotoQueueService.maxAttempts} · 用时 ${job.elapsedText}',
+        '提交 ${_fmtTime(job.createdAt)} · 尝试 ${job.attempts}/${PhotoQueueService.maxAttempts} · 耗时 ${job.elapsedText}',
         style: const TextStyle(fontSize: 11, color: AppConstants.textSecondary),
       ),
       children: [

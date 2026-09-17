@@ -153,6 +153,10 @@ class _HomePageState extends State<HomePage>
       case AppLifecycleState.resumed:
         // App 回到前台 → 停止前台服务（不自动验证登录状态）
         ForegroundService.stop();
+        // 队列自愈：回到前台主动把照片队列跑起来。
+        // 以前只有「启动 App」或「再提交照片」才会启动，
+        // 一旦被系统中断过，任务会一直卡在「处理中」等到下一次提交。
+        unawaited(PhotoQueueService.instance.start());
         KeepAliveLogger().add(KeepAliveLogEntry(
           timestamp: DateTime.now(),
           event: 'stopped',

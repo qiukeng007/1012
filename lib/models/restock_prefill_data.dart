@@ -9,6 +9,10 @@ class RestockPrefillData {
   final double? sellPrice;
   final String? imageUrl;
 
+  /// 队列里还没同步完的新照片（本地字节）。
+  /// 查询页刚提交过照片时会带上它：补货直接用这张发，不用等队列先同步。
+  final List<int>? imageBytes;
+
   const RestockPrefillData({
     required this.barcode,
     this.uid,
@@ -18,5 +22,6 @@ class RestockPrefillData {
     this.buyPrice,
     this.sellPrice,
     this.imageUrl,
+    this.imageBytes,
   });
 }

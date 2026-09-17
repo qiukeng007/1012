@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import '../utils/restock_time_format.dart';
 import 'server_txt_service.dart';
 
@@ -36,6 +37,10 @@ class RestockLogService {
   String _loadedUrl = '';
   Future<void>? _inflight;
   String? _lastError;
+
+  /// 记录变化的通知（每写成功一条、或重新下载完内容就 +1）。
+  /// 查询页靠它立刻刷新补货按钮上的日期，不用等 3 分钟缓存过期。
+  final ValueNotifier<int> revision = ValueNotifier<int>(0);
 
   /// 最近一次下载失败的原因（null = 没出错）
   String? get lastError => _lastError;
@@ -99,6 +104,7 @@ class RestockLogService {
     } finally {
       _fetchedAt = DateTime.now();
       _loadedUrl = url;
+      revision.value++;
     }
   }
 
@@ -155,6 +161,7 @@ class RestockLogService {
       return err;
     }
     _lastError = null;
+    revision.value++;
     return null;
   }
 
