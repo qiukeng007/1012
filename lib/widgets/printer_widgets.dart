@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../utils/constants.dart';
 import '../models/printer_config.dart';
 import '../models/product_result.dart';
 import '../services/print_service.dart';
@@ -270,7 +271,7 @@ class _PrinterEditSheetState extends State<PrinterEditSheet> {
     return TextField(
       controller: ctrl,
       onChanged: (v) { onChanged(v); },
-      keyboardType: TextInputType.number,
+      keyboardType: AppConstants.numberKeyboard(),
       decoration: InputDecoration(labelText: label, isDense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4), border: const OutlineInputBorder()),
       style: const TextStyle(fontSize: 12),
     );
@@ -358,7 +359,7 @@ class _PrintDialogState extends State<PrintDialog> {
             SizedBox(
               width: 100,
               child: TextField(
-                controller: _qtyCtrl, keyboardType: TextInputType.number,
+                controller: _qtyCtrl, keyboardType: AppConstants.numberKeyboard(),
                 autofocus: true,
                 decoration: const InputDecoration(isDense: true, contentPadding: EdgeInsets.symmetric(horizontal:12,vertical:10), border: OutlineInputBorder()),
                 onSubmitted: (_) => _doPrint(),

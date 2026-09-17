@@ -2346,8 +2346,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                       controller: _barcodeController,
                       focusNode: _barcodeFocus,
                       enabled: !_dataBusy,
-                      // iOS 数字键盘没有切字母键（打不了商品名称），用通用键盘
-                      keyboardType: AppConstants.barcodeKeyboard,
+                      // 条码框：默认数字键盘，但要能切换到字母/中文（按名称搜索）
+                      keyboardType: AppConstants.numberKeyboard(),
                       decoration: InputDecoration(
                         hintText: '扫描或输入条码',
                         isDense: true,
@@ -3236,8 +3236,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             TextField(
               controller: controller,
               autofocus: true,
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
+              keyboardType: AppConstants.numberKeyboard(decimal: true),
               textInputAction: TextInputAction.done,
               onSubmitted: (v) {
                 final price = _parseSellPriceInput(v);
@@ -3922,8 +3921,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                               controller: e.value,
                               textInputAction: TextInputAction.next,
                               // 安卓上点条码输入框默认给数字键盘（条码基本都是数字，也可以扫码/粘贴）；
-                              // iOS 的数字键盘没有切字母的入口，改用通用键盘
-                              keyboardType: AppConstants.barcodeKeyboard,
+                              // iOS 同样是数字优先，但带 ABC 键可以切字母
+                              keyboardType: AppConstants.numberKeyboard(),
                               decoration: InputDecoration(
                                 hintText: '扩展条码',
                                 isDense: true,
@@ -4837,7 +4836,7 @@ class _PcPrintDialogState extends State<_PcPrintDialog> {
           const Text('数量:', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
           const SizedBox(width: 12),
           SizedBox(width: 100, child: TextField(
-            controller: _qtyCtrl, keyboardType: TextInputType.number, autofocus: true,
+            controller: _qtyCtrl, keyboardType: AppConstants.numberKeyboard(), autofocus: true,
             decoration: const InputDecoration(isDense: true, contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10), border: OutlineInputBorder()),
             onSubmitted: (_) => _doPrint(),
           )),

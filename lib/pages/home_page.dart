@@ -462,7 +462,7 @@ class _HomePageState extends State<HomePage>
             TextField(
               controller: pwdCtrl,
               obscureText: true,
-              keyboardType: TextInputType.number,
+              keyboardType: AppConstants.numberKeyboard(),
               autofocus: true,
               decoration: const InputDecoration(
                 hintText: '请输入授权码',

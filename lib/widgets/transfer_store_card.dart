@@ -93,7 +93,7 @@ class _TransferStoreCardState extends State<TransferStoreCard> {
                   height: 28,
                   child: TextField(
                     controller: widget.stockController,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    keyboardType: AppConstants.numberKeyboard(decimal: true),
                     textAlign: TextAlign.center,
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                     decoration: const InputDecoration(

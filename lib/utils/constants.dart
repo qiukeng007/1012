@@ -8,14 +8,26 @@ class AppConstants {
   static const int maxStores = 10;
   static const int defaultStoreCount = 1;
 
-  /// 条码类输入框用的键盘：
-  /// 安卓用数字键盘（条码基本都是数字，而且安卓数字键盘自带「切换字母」键）；
-  /// iOS 的 TextInputType.number 会变成纯数字键盘（NumberPad），
-  /// 没有切字母/中文的入口，连商品名称都打不出来，所以 iOS 用通用键盘。
-  static TextInputType get barcodeKeyboard =>
+  /// 数字类输入框用的键盘：默认给数字键盘，但必须能切到字母/中文。
+  /// iOS 上 TextInputType.number / phone / 带小数 会分别映射成
+  /// NumberPad / PhonePad / DecimalPad，这三种都是纯数字键盘、
+  /// 没有切字母的入口；加上 signed 后 iOS 会映射成 NumbersAndPunctuation
+  /// —— 数字排在最上面、左下角有 ABC 键可以切回字母，
+  /// 正好是「默认数字 + 能切换」。安卓的数字/电话键盘本身自带切换键，保持原样。
+  static TextInputType numberKeyboard({bool decimal = false}) {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return TextInputType.numberWithOptions(signed: true, decimal: decimal);
+    }
+    return decimal
+        ? const TextInputType.numberWithOptions(decimal: true)
+        : TextInputType.number;
+  }
+
+  /// 电话号码输入框：安卓保持电话键盘，iOS 用可切换的数字键盘
+  static TextInputType get phoneKeyboard =>
       defaultTargetPlatform == TargetPlatform.iOS
-          ? TextInputType.text
-          : TextInputType.number;
+          ? TextInputType.numberWithOptions(signed: true)
+          : TextInputType.phone;
 
   /// 银豹后台地址归一化：域名一律使用 https。
   /// 微信扫码登录的 OAuth 回调必须走 https，银豹会话也只在 https 下正常下发；

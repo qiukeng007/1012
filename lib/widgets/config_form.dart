@@ -88,7 +88,7 @@ class _ConfigFormState extends State<ConfigForm> {
           _f('门店账号', _acctCtrl, '银豹门店账号', (v) => widget.onChanged(widget.config.copyWith(account: v))),
           const SizedBox(height: 8),
           if (widget.config.loginMethod != 'account') ...[
-            _f('员工工号', _jobCtrl, '例如：1001', (v) => widget.onChanged(widget.config.copyWith(cashierJobNumber: v)), keyboardType: TextInputType.number),
+            _f('员工工号', _jobCtrl, '例如：1001', (v) => widget.onChanged(widget.config.copyWith(cashierJobNumber: v)), keyboardType: AppConstants.numberKeyboard()),
             const SizedBox(height: 8),
           ],
           _f(widget.config.loginMethod == 'account' ? '登录密码' : '工号密码', _pwdCtrl,

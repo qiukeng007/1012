@@ -2373,7 +2373,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   border: OutlineInputBorder()),
               style: const TextStyle(fontSize: 13),
               controller: _printerPortCtrls[p.id]!,
-              keyboardType: TextInputType.number,
+              keyboardType: AppConstants.numberKeyboard(),
               onChanged: (v) =>
                   _updatePrinter(p.copyWith(port: int.tryParse(v) ?? 18888)),
             )),
@@ -2798,7 +2798,7 @@ class _SettingsPageState extends State<SettingsPage> {
               controller: ctrl,
               autofocus: true,
               obscureText: true,
-              keyboardType: TextInputType.number,
+              keyboardType: AppConstants.numberKeyboard(),
               decoration: const InputDecoration(hintText: '请输入验证密码'),
             ),
           ],
