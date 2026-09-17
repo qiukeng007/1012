@@ -329,6 +329,18 @@ class PhotoQueueService {
     await _saveQueueJob(job);
     await refreshCount();
     _notify();
+    // 入队就通知一次：查询页能立刻把这张本地照片显示出来、
+    // 并显示「排队中」角标，不用等队列跑完（以前只有 finalize 才发事件，
+    // 所以在补货页提交的照片要等整条队列跑完才看得到）。
+    _events.add(PhotoJobEvent(
+      jobId: job.id,
+      type: job.type,
+      status: job.status,
+      barcode: job.barcode,
+      productUid: job.productUid,
+      successCount: 0,
+      totalStores: job.stores.length,
+    ));
     start();
     return job;
   }
