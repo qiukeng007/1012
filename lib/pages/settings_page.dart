@@ -1592,6 +1592,11 @@ class _SettingsPageState extends State<SettingsPage> {
     _autoSaveTimer?.cancel();
     _autoSaveTimer = null;
     await widget.configService.saveRestockConfig(_restockConfig);
+    // 打印机配置现在也按模式隔离了：切换前先存回当前模式，
+    // 否则刚改的打印机会被当成另一种模式的配置
+    await widget.configService.savePrinterConfigs(_printerConfigs);
+    await widget.configService
+        .saveProfileConfigs(_activeProfile, _printerConfigs);
     if (!mounted) return;
     ModeService.instance.prompting = true;
     final bool? changed;
@@ -1605,18 +1610,9 @@ class _SettingsPageState extends State<SettingsPage> {
     }
     if (changed == true && mounted) {
       setState(() => _storeMode = ModeService.instance.isStoreMode);
-      // 打印机配置为两模式共用，切换模式时不重载不覆盖，保持当前场地/列表不变
-      final keepPrinters = _printerConfigs;
-      final keepProfiles = _printerProfiles;
-      final keepActive = _activeProfile;
+      // 打印机配置已按登录模式隔离：切换后 _loadConfigs 会读另一种模式的
+      // 那一套，不能再把旧模式的打印机覆盖回来（否则又变回两模式共用）
       await _loadConfigs();
-      if (mounted) {
-        setState(() {
-          _printerConfigs = keepPrinters;
-          _printerProfiles = keepProfiles;
-          _activeProfile = keepActive;
-        });
-      }
       // 首页/搜索页同步切换后的配置（两种模式配置各自独立保留）
       widget.onConfigChanged?.call();
     }

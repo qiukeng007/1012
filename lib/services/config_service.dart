@@ -230,19 +230,49 @@ class ConfigService {
     return config;
   }
 
-  static const _printerConfigKey = 'printer_configs';
+  // ===== 打印机配置（按登录模式隔离：总部模式 / 门店模式各一套，互不影响）=====
+  static const _printerConfigKeyHq = 'printer_configs_hq';
+  static const _printerConfigKeyStore = 'printer_configs_store';
+  /// 旧版两模式共用的 key：只作为升级时的首次读取来源，不再写入
+  static const _printerConfigKeyLegacy = 'printer_configs';
+  static const _profileActiveKeyHq = 'printer_profile_active_hq';
+  static const _profileActiveKeyStore = 'printer_profile_active_store';
+  static const _profileActiveKeyLegacy = 'printer_profile_active';
+  static const _profileListKeyHq = 'printer_profile_list_hq';
+  static const _profileListKeyStore = 'printer_profile_list_store';
+  static const _profileListKeyLegacy = 'printer_profile_list';
+  static const _profilePrefixHq = 'printer_profile_hq_';
+  static const _profilePrefixStore = 'printer_profile_store_';
+  static const _profilePrefixLegacy = 'printer_profile_';
 
-  /// 保存打印机配置
-  Future<void> savePrinterConfigs(List<PrinterConfig> configs) async {
-    final prefs = await SharedPreferences.getInstance();
-    final list = configs.map((c) => c.toJson()).toList();
-    await prefs.setString(_printerConfigKey, jsonEncode(list));
+  /// 当前登录模式对应的打印机相关 key
+  static Future<({String configs, String active, String list, String prefix})>
+      _printerKeys() async {
+    await ModeService.instance.ensureLoaded();
+    final store = ModeService.instance.isStoreMode;
+    return (
+      configs: store ? _printerConfigKeyStore : _printerConfigKeyHq,
+      active: store ? _profileActiveKeyStore : _profileActiveKeyHq,
+      list: store ? _profileListKeyStore : _profileListKeyHq,
+      prefix: store ? _profilePrefixStore : _profilePrefixHq,
+    );
   }
 
-  /// 加载打印机配置
-  Future<List<PrinterConfig>> loadPrinterConfigs() async {
+  /// 保存打印机配置（只写当前登录模式的那一套）
+  Future<void> savePrinterConfigs(List<PrinterConfig> configs) async {
+    final keys = await _printerKeys();
     final prefs = await SharedPreferences.getInstance();
-    final jsonStr = prefs.getString(_printerConfigKey);
+    final list = configs.map((c) => c.toJson()).toList();
+    await prefs.setString(keys.configs, jsonEncode(list));
+  }
+
+  /// 加载打印机配置。本模式还没单独存过时先用旧版共用配置兜底
+  /// （升级后第一次打开不会变空；一旦在本模式改过，就各存各的互不影响）
+  Future<List<PrinterConfig>> loadPrinterConfigs() async {
+    final keys = await _printerKeys();
+    final prefs = await SharedPreferences.getInstance();
+    final jsonStr = prefs.getString(keys.configs) ??
+        prefs.getString(_printerConfigKeyLegacy);
     if (jsonStr == null || jsonStr.isEmpty) return defaultPrinters();
     try {
       final list = jsonDecode(jsonStr) as List<dynamic>;
@@ -255,21 +285,23 @@ class ConfigService {
     }
   }
 
-  // ===== 打印机多场地配置 =====
-  static const _profileActiveKey = 'printer_profile_active';
-  static const _profileListKey = 'printer_profile_list';
-  static const _profilePrefix = 'printer_profile_';
+  // ===== 打印机多场地配置（同样按登录模式隔离）=====
 
   /// 获取当前激活的配置名称
   Future<String> getActiveProfileName() async {
+    final keys = await _printerKeys();
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_profileActiveKey) ?? '默认';
+    return prefs.getString(keys.active) ??
+        prefs.getString(_profileActiveKeyLegacy) ??
+        '默认';
   }
 
   /// 获取所有配置名称列表
   Future<List<String>> getProfileNames() async {
+    final keys = await _printerKeys();
     final prefs = await SharedPreferences.getInstance();
-    final jsonStr = prefs.getString(_profileListKey);
+    final jsonStr =
+        prefs.getString(keys.list) ?? prefs.getString(_profileListKeyLegacy);
     if (jsonStr == null || jsonStr.isEmpty) return ['默认'];
     try {
       return (jsonDecode(jsonStr) as List<dynamic>).cast<String>();
@@ -280,60 +312,65 @@ class ConfigService {
 
   /// 切换激活的配置
   Future<void> setActiveProfile(String name) async {
+    final keys = await _printerKeys();
     // 保存当前配置到当前 profile
     final currentConfigs = await loadPrinterConfigs();
     final currentName = await getActiveProfileName();
-    await _saveProfile(currentName, currentConfigs);
+    await _saveProfile(keys.prefix, currentName, currentConfigs);
 
     // 切换
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_profileActiveKey, name);
+    await prefs.setString(keys.active, name);
 
     // 加载新 profile 的配置
-    final newConfigs = await _loadProfile(name);
+    final newConfigs = await _loadProfile(keys.prefix, name);
     await savePrinterConfigs(newConfigs);
   }
 
   /// 新建配置（复制当前）
   Future<void> createProfile(String name) async {
+    final keys = await _printerKeys();
     final currentConfigs = await loadPrinterConfigs();
-    await _saveProfile(name, currentConfigs);
+    await _saveProfile(keys.prefix, name, currentConfigs);
 
     final names = await getProfileNames();
     names.add(name);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_profileListKey, jsonEncode(names));
+    await prefs.setString(keys.list, jsonEncode(names));
   }
 
   /// 重命名配置
   Future<void> renameProfile(String oldName, String newName) async {
+    final keys = await _printerKeys();
     final prefs = await SharedPreferences.getInstance();
-    final oldJson = prefs.getString('$_profilePrefix$oldName');
+    final oldJson = prefs.getString('${keys.prefix}$oldName') ??
+        prefs.getString('$_profilePrefixLegacy$oldName');
     if (oldJson != null) {
-      await prefs.setString('$_profilePrefix$newName', oldJson);
-      await prefs.remove('$_profilePrefix$oldName');
+      await prefs.setString('${keys.prefix}$newName', oldJson);
+      await prefs.remove('${keys.prefix}$oldName');
     }
 
     final names = await getProfileNames();
     final idx = names.indexOf(oldName);
     if (idx >= 0) {
       names[idx] = newName;
-      await prefs.setString(_profileListKey, jsonEncode(names));
+      await prefs.setString(keys.list, jsonEncode(names));
     }
 
     final active = await getActiveProfileName();
     if (active == oldName) {
-      await prefs.setString(_profileActiveKey, newName);
+      await prefs.setString(keys.active, newName);
     }
   }
 
   /// 删除配置
   Future<void> deleteProfile(String name) async {
+    final keys = await _printerKeys();
     final names = await getProfileNames();
     names.remove(name);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_profileListKey, jsonEncode(names));
-    await prefs.remove('$_profilePrefix$name');
+    await prefs.setString(keys.list, jsonEncode(names));
+    await prefs.remove('${keys.prefix}$name');
 
     // 如果删的是激活的，切到第一个
     final active = await getActiveProfileName();
@@ -343,24 +380,30 @@ class ConfigService {
   }
 
   /// 保存当前配置到指定 profile
-  Future<void> saveProfileConfigs(String name, List<PrinterConfig> configs) async {
-    await _saveProfile(name, configs);
+  Future<void> saveProfileConfigs(
+      String name, List<PrinterConfig> configs) async {
+    final keys = await _printerKeys();
+    await _saveProfile(keys.prefix, name, configs);
   }
 
-  Future<void> _saveProfile(String name, List<PrinterConfig> configs) async {
+  Future<void> _saveProfile(
+      String prefix, String name, List<PrinterConfig> configs) async {
     final prefs = await SharedPreferences.getInstance();
     final list = configs.map((c) => c.toJson()).toList();
-    await prefs.setString('$_profilePrefix$name', jsonEncode(list));
+    await prefs.setString('$prefix$name', jsonEncode(list));
   }
 
-  /// 加载指定 profile 的配置
-  Future<List<PrinterConfig>> _loadProfile(String name) async {
+  /// 加载指定 profile 的配置（本模式没存过就用旧版共用配置兜底）
+  Future<List<PrinterConfig>> _loadProfile(String prefix, String name) async {
     final prefs = await SharedPreferences.getInstance();
-    final jsonStr = prefs.getString('$_profilePrefix$name');
+    final jsonStr = prefs.getString('$prefix$name') ??
+        prefs.getString('$_profilePrefixLegacy$name');
     if (jsonStr == null || jsonStr.isEmpty) return defaultPrinters();
     try {
       final list = jsonDecode(jsonStr) as List<dynamic>;
-      return list.map((e) => PrinterConfig.fromJson(e as Map<String, dynamic>)).toList();
+      return list
+          .map((e) => PrinterConfig.fromJson(e as Map<String, dynamic>))
+          .toList();
     } catch (_) {
       return defaultPrinters();
     }
@@ -376,6 +419,23 @@ class ConfigService {
     await prefs.remove(_restockConfigKeyHq);
     await prefs.remove(_restockConfigKeyStore);
     await prefs.remove(_restockConfigKeyLegacy);
+    await prefs.remove(_printerConfigKeyHq);
+    await prefs.remove(_printerConfigKeyStore);
+    await prefs.remove(_printerConfigKeyLegacy);
+    await prefs.remove(_profileActiveKeyHq);
+    await prefs.remove(_profileActiveKeyStore);
+    await prefs.remove(_profileActiveKeyLegacy);
+    await prefs.remove(_profileListKeyHq);
+    await prefs.remove(_profileListKeyStore);
+    await prefs.remove(_profileListKeyLegacy);
+    // 各个具名方案的内容（printer_profile_*）
+    for (final k in prefs.getKeys().toList()) {
+      if (k.startsWith(_profilePrefixHq) ||
+          k.startsWith(_profilePrefixStore) ||
+          k.startsWith(_profilePrefixLegacy)) {
+        await prefs.remove(k);
+      }
+    }
     await _secureStorage.deleteAll();
   }
 }

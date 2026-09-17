@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../services/mode_service.dart';
+import '../services/photo_queue_service.dart';
 import '../utils/constants.dart';
+import '../widgets/copyable_error_dialog.dart';
 
 /// 首次使用/重置时的「选择登录模式」页面。
 ///
@@ -91,8 +93,48 @@ class _ModeSelectPageState extends State<ModeSelectPage> {
     );
   }
 
+  /// 队列里还没同步完的照片任务（切换模式前必须拦下来）
+  Future<List<PhotoJob>> _unfinishedJobs() async {
+    try {
+      final jobs = await PhotoQueueService.instance.pendingJobs();
+      return jobs.where((j) => !j.status.isFinished).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
   Future<void> _confirm() async {
     if (_saving) return;
+
+    // 队列里还有没同步完的照片时不许切换模式：两套模式的登录态/门店
+    // 完全不同，切过去这些任务会卡住或者同步到另一套的门店上。
+    final pending = await _unfinishedJobs();
+    if (pending.isNotEmpty) {
+      if (!mounted) return;
+      final lines = <String>[];
+      for (final j in pending) {
+        lines.add('· ${j.type.label} · 条码 ${j.barcode}'
+            '${j.productName.isNotEmpty ? ' · ${j.productName}' : ''}'
+            ' · ${j.status.label} · 已尝试 ${j.attempts}/${PhotoQueueService.maxAttempts}');
+      }
+      final detail = StringBuffer()
+        ..writeln('当前还有 ${pending.length} 个照片任务没有同步完，'
+            '现在切换模式会打断它们，所以先不让切。')
+        ..writeln()
+        ..writeln('未同步完的任务：')
+        ..writeln(lines.join('\n'))
+        ..writeln()
+        ..writeln('怎么办：')
+        ..writeln('1. 保持这个模式、保持手机联网，让队列自己跑完'
+            '（回到首页就行，队列在后台继续跑）；')
+        ..writeln('2. 想快点结束，去 配置页 → 照片队列日志，'
+            '点那条任务的「删除记录」把它去掉；')
+        ..writeln('3. 等上面的任务都同步完（或都删掉）之后，再切换模式。');
+      await showCopyableError(context, '还有照片没同步完，暂时不能切换模式',
+          detail.toString().trim());
+      return;
+    }
+
     setState(() => _saving = true);
     await ModeService.instance.setStoreMode(_store);
     if (!mounted) return;
