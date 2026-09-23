@@ -14,8 +14,27 @@
     <!-- 前台服务权限（后台保活） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 省电锁：上传照片期间让 CPU / Wi-Fi 不睡（锁屏也能继续传） -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- 电池优化白名单：锁屏后不被系统冻结 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 开机 / 覆盖安装后自动把通知监听接回来 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- 通知权限（Android 13+） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 系统语音引擎（TTS）：Android 11+ 不加这个看不到语音引擎 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <!-- Android 11+ 不加这条，读不到已安装的应用列表（通知页要勾选应用） -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <application
         android:label="银豹查询"
@@ -45,6 +64,17 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <!-- 通知抓取：系统主动回调（用户在「通知使用权」里授权后生效） -->
+        <service
+            android:name=".NotifyListenerService"
+            android:exported="true"
+            android:label="银豹查询"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <!-- 前台服务：后台保活 -->
         <service
             android:name=".KeepAliveService"
@@ -54,5 +84,16 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="keep_alive_for_store_session_maintenance" />
         </service>
+
+        <!-- 开机 / 覆盖安装新包后自动把通知监听和保活接回来 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

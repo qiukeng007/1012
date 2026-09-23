@@ -18,6 +18,7 @@ import '../services/auth_service.dart';
 import '../services/update_service.dart';
 import '../services/foreground_service.dart';
 import '../services/keepalive_logger.dart';
+import '../services/notify_service.dart';
 import '../services/photo_queue_service.dart';
 import '../services/mode_service.dart';
 import '../services/usage_log_service.dart';
@@ -28,6 +29,7 @@ import 'query_page.dart';
 import 'restock_page.dart';
 import 'mode_select_page.dart';
 import 'records_page.dart';
+import 'notify_page.dart';
 
 /// 主页（底部导航栏 Tab 切换）
 class HomePage extends StatefulWidget {
@@ -53,6 +55,11 @@ class _HomePageState extends State<HomePage>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   int _currentTab = 0;
   final PageController _pageController = PageController();
+
+  /// 通知页（抓通知 + 语音播报）只有安卓有：iOS 系统不允许第三方 App 读通知栏，也不支持播报
+  static final bool _hasNotify = NotifyService.supported;
+  /// 「配置」页在底部导航 / PageView 里的下标（安卓中间多一个「通知」页）
+  int get _settingsTabIndex => _hasNotify ? 4 : 3;
 
   // 服务实例
   late final ConfigService _configService;
@@ -96,6 +103,11 @@ class _HomePageState extends State<HomePage>
   String _imageCountDiag = '';
   static const String _imageCountCachePrefix = 'image_count_';
   int _settingsRefreshTick = 0;
+  /// 底部铃铛旁边那个状态点：权限开了没、监听连着没、语音播报开着没
+  bool _notifyEnabled = false;
+  bool _notifyConnected = false;
+  bool _notifySpeak = true;
+  Timer? _notifyDotTimer;
   final ValueNotifier<({String barcode, String imageUrl})?>
       _restockImageNotifier = ValueNotifier(null);
   final ValueNotifier<({String barcode, String supplier})?>
@@ -113,6 +125,11 @@ class _HomePageState extends State<HomePage>
     _initAuth();
     // 启动后尽力补传上次未上传成功的登录记录（静默）
     unawaited(UsageLogService.instance.flushPending());
+    // 通知抓取 + 语音播报（安卓原生监听，进页面就能收到实时推送）
+    unawaited(NotifyService.instance.start());
+    // 通知权限小绿点：进页面先查一次，之后在前台每 5 秒看一眼
+    unawaited(_refreshNotifyDot());
+    _startNotifyDotTimer();
   }
 
   @override
@@ -122,6 +139,7 @@ class _HomePageState extends State<HomePage>
     _photoQueueSub?.cancel();
     _queueRing.dispose();
     _serverCheckTimer?.cancel();
+    _notifyDotTimer?.cancel();
     _restockImageNotifier.dispose();
     _restockSupplierNotifier.dispose();
     _pageController.dispose();
@@ -135,6 +153,8 @@ class _HomePageState extends State<HomePage>
       case AppLifecycleState.paused:
       case AppLifecycleState.inactive:
         // App 进入后台 → 启动前台服务保活
+        _notifyDotTimer?.cancel();
+        _notifyDotTimer = null;
         final fgNow = DateTime.now();
         ForegroundService.start().then((ok) {
           KeepAliveLogger().add(KeepAliveLogEntry(
@@ -153,6 +173,8 @@ class _HomePageState extends State<HomePage>
       case AppLifecycleState.resumed:
         // App 回到前台 → 停止前台服务（不自动验证登录状态）
         ForegroundService.stop();
+        unawaited(_refreshNotifyDot());
+        _startNotifyDotTimer();
         // 队列自愈：回到前台主动把照片队列跑起来。
         // 以前只有「启动 App」或「再提交照片」才会启动，
         // 一旦被系统中断过，任务会一直卡在「处理中」等到下一次提交。
@@ -1029,6 +1051,68 @@ class _HomePageState extends State<HomePage>
   }
 
   /// 可复制弹窗（长文本可选中 + 一键复制）
+  /// 状态点的数据来源
+  Future<void> _refreshNotifyDot() async {
+    if (!NotifyService.supported) return;
+    try {
+      final rt = await NotifyService.instance.runtimeState();
+      final en = rt['listenerEnabled'] == true;
+      final cn = rt['connected'] == true;
+      final sp = rt['speak'] != false;
+      if (!mounted) return;
+      if (en != _notifyEnabled ||
+          cn != _notifyConnected ||
+          sp != _notifySpeak) {
+        setState(() {
+          _notifyEnabled = en;
+          _notifyConnected = cn;
+          _notifySpeak = sp;
+        });
+      }
+    } catch (_) {}
+  }
+
+  /// 底部「通知」铃铛旁边的状态点：
+  /// 绿=权限已开、监听已连上、语音播报开着（完全正常）
+  /// 红=通知使用权没开（完全不通）
+  /// 半绿半红=其它情况：连着但语音播报关着，或者权限开了但监听掉线
+  Widget _notifyDot() {
+    final ok = _notifyEnabled && _notifyConnected && _notifySpeak;
+    final half = !ok && _notifyEnabled;
+    // 别再往框外挤（从前 left:-5 / top:-4）：超出图标框的部分会被父容器裁掉，
+    // 看着就是「小圆点显示不全」。贴着左上角画，整个圆一定在框里。
+    return Positioned(
+      left: 0,
+      top: 0,
+      child: Container(
+        width: 9,
+        height: 9,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: ok
+              ? const Color(0xFF35D07F)
+              : (half ? null : const Color(0xFFFF4D4F)),
+          gradient: half
+              ? const LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: [Color(0xFF35D07F), Color(0xFFFF4D4F)],
+                  stops: [0.5, 0.5],
+                )
+              : null,
+          border: Border.all(color: Colors.white, width: 1),
+        ),
+      ),
+    );
+  }
+
+  void _startNotifyDotTimer() {
+    if (!NotifyService.supported) return;
+    _notifyDotTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(_refreshNotifyDot());
+    });
+  }
+
   Future<void> _showCopyableInfo(String msg) async {
     if (!mounted) return;
     await showDialog<void>(
@@ -1217,7 +1301,9 @@ class _HomePageState extends State<HomePage>
             onPageChanged: (i) {
               setState(() => _currentTab = i);
               // 打开配置页也触发静默获取供货商（手动模式下仅一次）
-              if (i == 3) _maybeSilentFetchSuppliers();
+              if (i == _settingsTabIndex) _maybeSilentFetchSuppliers();
+              // 打开通知页就算看过了，底部红点清零（iOS 没有通知页，不会命中）
+              if (_hasNotify && i == 3) NotifyService.instance.markAllRead();
             },
             children: [
               // Tab 0: 查询（默认首页）
@@ -1262,7 +1348,9 @@ class _HomePageState extends State<HomePage>
                 const Center(child: Text('加载补货配置失败')),
               // Tab 2: 记录
               const RecordsPage(),
-              // Tab 3: 配置
+              // Tab 3: 通知（收到通知 + 语音播报）—— 仅安卓有
+              if (_hasNotify) const NotifyPage(),
+              // Tab 4: 配置
               SettingsPage(
                 configService: _configService,
                 loginService: _loginService,
@@ -1320,33 +1408,74 @@ class _HomePageState extends State<HomePage>
             ),
         ],
       ),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentTab,
-        onTap: (index) {
-          _pageController.animateToPage(index,
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeOut);
-        },
-        selectedItemColor: AppConstants.primaryColor,
-        unselectedItemColor: AppConstants.textSecondary,
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.qr_code_scanner),
-            label: '查询',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.add_business),
-            label: '补货',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.receipt_long),
-            label: '记录',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.settings),
-            label: '配置',
-          ),
-        ],
+      // type: fixed —— 不加这个的话，5 个标签时只有选中的那个显示文字（默认 4 个以上就变 shifting）
+      bottomNavigationBar: ValueListenableBuilder<int>(
+        valueListenable: NotifyService.instance.unread,
+        builder: (ctx, unread, _) => BottomNavigationBar(
+          currentIndex: _currentTab,
+          type: BottomNavigationBarType.fixed,
+          onTap: (index) {
+            _pageController.animateToPage(index,
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOut);
+          },
+          selectedItemColor: AppConstants.primaryColor,
+          unselectedItemColor: AppConstants.textSecondary,
+          items: [
+            const BottomNavigationBarItem(
+              icon: Icon(Icons.qr_code_scanner),
+              label: '查询',
+            ),
+            const BottomNavigationBarItem(
+              icon: Icon(Icons.add_business),
+              label: '补货',
+            ),
+            const BottomNavigationBarItem(
+              icon: Icon(Icons.receipt_long),
+              label: '记录',
+            ),
+            if (_hasNotify)
+            BottomNavigationBarItem(
+              icon: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  const Icon(Icons.notifications),
+                  // 通知状态点：绿=权限开了且连着；红=权限没开；半绿半红=掉了线
+                  if (NotifyService.supported) _notifyDot(),
+                  if (unread > 0)
+                    Positioned(
+                      right: 0,
+                      top: 0,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: AppConstants.errorColor,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        constraints:
+                            const BoxConstraints(minWidth: 14),
+                        child: Text(
+                          unread > 99 ? '99+' : '$unread',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                              fontSize: 9,
+                              height: 1.2,
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              label: '通知',
+            ),
+            const BottomNavigationBarItem(
+              icon: Icon(Icons.settings),
+              label: '配置',
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -12,8 +12,14 @@ class RestockSubmitResult {
   final bool ok;
   final String detail;
   final bool networkFailure;
+
+  /// 顶部那条短提示用的一句话（例如「补货服务器连不上（服务器或隧道没起来）」）。
+  /// 空 = 调用方用自己的默认说法。
+  final String shortReason;
   const RestockSubmitResult(this.ok,
-      {this.detail = '', this.networkFailure = false});
+      {this.detail = '',
+      this.networkFailure = false,
+      this.shortReason = ''});
 }
 
 /// 补货/预定/订单查询 服务
@@ -194,6 +200,13 @@ class RestockService {
       'image=$fileName（$imageInfo）',
     ];
 
+    /// 失败时给顶部那条短提示用的一句话（在 report() 里按状态码 / 响应内容判定）。
+    String shortReason = '';
+
+    /// 这次失败是不是"服务器/隧道根本没应答"。
+    /// 是的话调用方按「连不上服务器」处理：存离线队列、服务器恢复后自动补传。
+    var originDeadFlag = false;
+
     String report(String reason,
         {int? status, String? headers, List<int>? respBody}) {
       final b = respBody ?? const <int>[];
@@ -218,14 +231,35 @@ class RestockService {
       }
       if (imageWarn != null) buf.writeln('照片问题：$imageWarn');
       if (status != null && status != 200) {
+        final text = _decodeBody(b);
+        final hdr = headers ?? '';
+        // Cloudflare 的错误页：error code 10xx = 隧道连不到源站；
+        // 52x 也是 CF 自己的状态码；cfOrigin;dur=0 = 源站一次都没应答。
+        final cfTunnel = RegExp(r'error code:\s*10\d\d').hasMatch(text);
+        final originDead = cfTunnel ||
+            (status >= 520 && status <= 527) ||
+            (hdr.contains('cf-ray') && hdr.contains('cfOrigin;dur=0'));
         buf.writeln('—— 结论 ——');
-        buf.writeln('这条报错是补货服务器自己的错误页：服务端执行补货时出了异常，'
-            '手机这边的照片和字段都是正常的。');
-        buf.writeln('最常见原因：服务器的「供货商」表里查不到「$sentShop」这一行'
-            '（名字不一致：首尾多空格、全角括号（）和半角()不同、或者改过名）。');
-        buf.writeln('建议：电脑端补货系统点「一键获取供货商列表」，'
-            '确认里面有没有「$sentShop」；没有就把名字改一致再提交。');
-        if (_decodeBody(b).contains('\uFFFD')) {
+        if (originDead) {
+          shortReason = '补货服务器连不上（服务器或隧道没起来）';
+          originDeadFlag = true;
+          buf.writeln('这条不是补货服务器返回的，是它前面的 Cloudflare 返回的'
+              '（HTTP $status${cfTunnel ? '，error code: 1033' : ''}）。');
+          buf.writeln('意思是：Cloudflare 连不到你电脑上的补货服务 —— '
+              '补货服务没启动、隧道（cloudflared）断了、或者电脑关机 / 断网。');
+          buf.writeln('响应头里 cfOrigin;dur=0 就是"源站一次都没应答"的记号。');
+          buf.writeln('跟手机端、照片、供货商名字都没关系；重复点提交也还是失败。');
+          buf.writeln('怎么办：去电脑端把补货服务（WebServer / esp）和隧道启动起来，再提交一次。');
+        } else {
+          shortReason = '补货服务器返回错误';
+          buf.writeln('这条报错是补货服务器自己的错误页：服务端执行补货时出了异常，'
+              '手机这边的照片和字段都是正常的。');
+          buf.writeln('最常见原因：服务器的「供货商」表里查不到「$sentShop」这一行'
+              '（名字不一致：首尾多空格、全角括号（）和半角()不同、或者改过名）。');
+          buf.writeln('建议：电脑端补货系统点「一键获取供货商列表」，'
+              '确认里面有没有「$sentShop」；没有就把名字改一致再提交。');
+        }
+        if (text.contains('\uFFFD')) {
           buf.writeln('（「文本」里的乱码是服务器用 GBK 编码返回造成的，不影响内容）');
         }
       }
@@ -257,13 +291,15 @@ class RestockService {
       if (ok && imageWarn == null) {
         return const RestockSubmitResult(true);
       }
+      // 顺序要紧：先跑 report()（那句 shortReason 是在它里面判定的），再组结果。
+      final detail = report(
+        ok ? '服务器已受理，但照片可能无法显示' : '补货服务器返回错误',
+        status: response.statusCode,
+        headers: respHeaders.toString(),
+        respBody: respBytes,
+      );
       return RestockSubmitResult(ok,
-          detail: report(
-            ok ? '服务器已受理，但照片可能无法显示' : '补货服务器返回错误',
-            status: response.statusCode,
-            headers: respHeaders.toString(),
-            respBody: respBytes,
-          ));
+          detail: detail, shortReason: shortReason, networkFailure: !ok && originDeadFlag);
     } catch (e) {
       return RestockSubmitResult(false,
           detail: report('连不上补货服务器：${e.runtimeType}: $e'),

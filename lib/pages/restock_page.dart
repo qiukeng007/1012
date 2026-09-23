@@ -9,6 +9,7 @@ import '../models/restock_prefill_data.dart';
 import '../models/store_config.dart';
 import '../services/product_image_cache.dart';
 import '../services/mode_service.dart';
+import '../services/config_service.dart';
 import '../services/restock_service.dart';
 import '../services/query_service.dart';
 import '../services/operation_log_service.dart';
@@ -619,11 +620,12 @@ class _ReplenishFormState extends State<_ReplenishForm> {
           }
         } else {
           final saved = await _saveReplenishOffline(imageBytes);
+          final head = res.shortReason.isNotEmpty
+              ? res.shortReason
+              : (res.networkFailure ? '连不上补货服务器' : '补货服务器返回错误');
           final baseMsg = res.networkFailure
-              ? (saved
-                  ? '连不上补货服务器，已保存到本地，服务器恢复后自动提交'
-                  : '连不上补货服务器，本地保存也失败')
-              : '补货服务器返回错误，提交失败';
+              ? (saved ? '$head，已保存到本地，服务器恢复后自动提交' : '$head，本地保存也失败')
+              : '$head，提交失败';
           if (syncMsgs.isNotEmpty) {
             _showMsg('$baseMsg，${syncMsgs.join('，')}');
           } else {
@@ -637,8 +639,13 @@ class _ReplenishFormState extends State<_ReplenishForm> {
             detail: '数量: ${_qtyCtrl.text.trim()}（提交补货服务器失败）',
             errorDetail: res.detail,
           ));
-          _showCopyableError(
-              res.networkFailure ? '连不上补货服务器' : '补货服务器提交失败', res.detail);
+          // 已经存进离线队列的（服务器/隧道没起来那种）不再弹窗 —— 每次点都弹一下太吵，
+          // 而且它并不算"白提交"：完整取证已经写进操作记录，点开就能复制。
+          // 真失败（连离线都存不下 / 服务器自己报错）才弹。
+          if (!saved) {
+            _showCopyableError(
+                res.networkFailure ? '连不上补货服务器' : '补货服务器提交失败', res.detail);
+          }
           if (saved) {
             // 数据已保存到本地，等同提交成功处理：清空表单、返回首页（照片已入后台队列）
             final submittedBarcode = _barcodeCtrl.text;
@@ -1075,6 +1082,170 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     });
   }
 
+  /// 供货商选择弹窗（和查询页一样）：最上面是「最近选择」，下面是可搜索列表
+  Future<String?> _pickSupplier(List<String> options) async {
+    var recents = const <String>[];
+    try {
+      final saved = await ConfigService.loadRecentSuppliers();
+      recents = saved.where(options.contains).toList();
+    } catch (_) {}
+    if (!mounted) return null;
+    var selected = _selectedShop ?? '';
+    return showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        var keyword = '';
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            // 名字可能很长：最近选择的按钮最多占半行，超出省略（长按看全称）
+            final chipMaxW = (MediaQuery.of(ctx).size.width - 32) / 2 - 6;
+            final filtered = keyword.trim().isEmpty
+                ? options
+                : options.where((o) => o.contains(keyword.trim())).toList();
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 16,
+                  bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('选择供货商',
+                        style: TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w600)),
+                    if (recents.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Row(
+                        children: const [
+                          Icon(Icons.history,
+                              size: 14, color: AppConstants.textSecondary),
+                          SizedBox(width: 4),
+                          Text('最近选择',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: AppConstants.textSecondary)),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: recents
+                            .map((r) => Tooltip(
+                                  message: r,
+                                  child: GestureDetector(
+                                    onTap: () =>
+                                        setSheetState(() => selected = r),
+                                    child: ConstrainedBox(
+                                      constraints:
+                                          BoxConstraints(maxWidth: chipMaxW),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 10, vertical: 6),
+                                        decoration: BoxDecoration(
+                                          color: r == selected
+                                              ? const Color(0xFF28a745)
+                                                  .withValues(alpha: 0.12)
+                                              : AppConstants.bgColor,
+                                          borderRadius:
+                                              BorderRadius.circular(14),
+                                          border: Border.all(
+                                            color: r == selected
+                                                ? const Color(0xFF28a745)
+                                                : AppConstants.dividerColor,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          r,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            color: r == selected
+                                                ? const Color(0xFF28a745)
+                                                : AppConstants.textPrimary,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ))
+                            .toList(),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    TextField(
+                      decoration: const InputDecoration(
+                        hintText: '搜索供货商',
+                        prefixIcon: Icon(Icons.search),
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (v) => setSheetState(() => keyword = v),
+                    ),
+                    const SizedBox(height: 8),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 320),
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: filtered.isEmpty
+                            ? const [
+                                Padding(
+                                  padding: EdgeInsets.all(16),
+                                  child: Text('无匹配供货商',
+                                      style: TextStyle(
+                                          color: AppConstants.textSecondary)),
+                                ),
+                              ]
+                            : filtered
+                                .map((o) => ListTile(
+                                      dense: true,
+                                      leading: Icon(
+                                        o == selected
+                                            ? Icons.radio_button_checked
+                                            : Icons.radio_button_off,
+                                        color: o == selected
+                                            ? const Color(0xFF28a745)
+                                            : AppConstants.textSecondary,
+                                      ),
+                                      title: Text(o,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis),
+                                      selected: o == selected,
+                                      onTap: () =>
+                                          setSheetState(() => selected = o),
+                                    ))
+                                .toList(),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppConstants.primaryColor,
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: selected.isEmpty
+                            ? null
+                            : () => Navigator.pop(ctx, selected),
+                        child: const Text('确定'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
   Widget _buildShopDropdown() {
     final configSuppliers = widget.service.suppliers;
     // 合并配置列表 + 当前选中值（支持从查询结果预填的供货商）
@@ -1085,22 +1256,51 @@ class _ReplenishFormState extends State<_ReplenishForm> {
       options.insert(0, _selectedShop!);
     }
 
-    return DropdownButtonFormField<String>(
-      value: _selectedShop != null && options.contains(_selectedShop)
-          ? _selectedShop
-          : null,
-      decoration: _inputDecoration(hint: '-- 请选择供货商 --'),
-      isExpanded: true,
-      items: options.map((s) {
-        return DropdownMenuItem(value: s, child: Text(s));
-      }).toList(),
-      onChanged: (v) => setState(() {
-        _selectedShop = v;
-        _shopCtrl.text = v ?? '';
-      }),
+    return FormField<String>(
+      initialValue: _selectedShop,
       validator: (v) {
         if (v == null || v.trim().isEmpty) return '请选择供货商';
         return null;
+      },
+      builder: (field) {
+        final text = _selectedShop ?? '';
+        return InkWell(
+          onTap: () async {
+            final picked = await _pickSupplier(options);
+            if (picked == null || picked.isEmpty) return;
+            // 记一笔最近选择（最多留 5 个），下次直接点
+            unawaited(ConfigService.addRecentSupplier(picked));
+            setState(() {
+              _selectedShop = picked;
+              _shopCtrl.text = picked;
+            });
+            field.didChange(picked);
+          },
+          child: InputDecorator(
+            decoration:
+                _inputDecoration().copyWith(errorText: field.errorText),
+            isEmpty: text.isEmpty,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    text.isEmpty ? '-- 请选择供货商 --' : text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: text.isEmpty
+                          ? AppConstants.textSecondary
+                          : AppConstants.textPrimary,
+                    ),
+                  ),
+                ),
+                const Icon(Icons.arrow_drop_down,
+                    color: AppConstants.textSecondary),
+              ],
+            ),
+          ),
+        );
       },
     );
   }
@@ -1281,7 +1481,11 @@ class _BookingFormState extends State<_BookingForm> {
               createdAt: DateTime.now().toIso8601String(),
             ),
           );
-          _showMsg(saved ? '连不上补货服务器，已保存到本地，连接服务器后自动提交' : '提交失败，请检查网络和服务器地址');
+          _showMsg(saved
+              ? '连不上补货服务器，已保存到本地，连接服务器后自动提交'
+              : (res.shortReason.isNotEmpty
+                  ? '${res.shortReason}，提交失败'
+                  : '提交失败，请检查网络和服务器地址'));
           // 完整取证：弹可复制窗口，并写进操作记录
           unawaited(OperationLogService.add(
             store: _selectedShop ?? '',
@@ -1290,8 +1494,10 @@ class _BookingFormState extends State<_BookingForm> {
             detail: '数量: ${_qtyCtrl.text.trim()}（提交补货服务器失败）',
             errorDetail: res.detail,
           ));
-          _showCopyableError(
-              res.networkFailure ? '连不上补货服务器' : '补货服务器提交失败', res.detail);
+          if (!saved) {
+            _showCopyableError(
+                res.networkFailure ? '连不上补货服务器' : '补货服务器提交失败', res.detail);
+          }
         }
       }
     } catch (e) {
@@ -1568,6 +1774,170 @@ class _BookingFormState extends State<_BookingForm> {
     });
   }
 
+  /// 供货商选择弹窗（和查询页一样）：最上面是「最近选择」，下面是可搜索列表
+  Future<String?> _pickSupplier(List<String> options) async {
+    var recents = const <String>[];
+    try {
+      final saved = await ConfigService.loadRecentSuppliers();
+      recents = saved.where(options.contains).toList();
+    } catch (_) {}
+    if (!mounted) return null;
+    var selected = _selectedShop ?? '';
+    return showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        var keyword = '';
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            // 名字可能很长：最近选择的按钮最多占半行，超出省略（长按看全称）
+            final chipMaxW = (MediaQuery.of(ctx).size.width - 32) / 2 - 6;
+            final filtered = keyword.trim().isEmpty
+                ? options
+                : options.where((o) => o.contains(keyword.trim())).toList();
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 16,
+                  bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('选择供货商',
+                        style: TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w600)),
+                    if (recents.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Row(
+                        children: const [
+                          Icon(Icons.history,
+                              size: 14, color: AppConstants.textSecondary),
+                          SizedBox(width: 4),
+                          Text('最近选择',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: AppConstants.textSecondary)),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: recents
+                            .map((r) => Tooltip(
+                                  message: r,
+                                  child: GestureDetector(
+                                    onTap: () =>
+                                        setSheetState(() => selected = r),
+                                    child: ConstrainedBox(
+                                      constraints:
+                                          BoxConstraints(maxWidth: chipMaxW),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 10, vertical: 6),
+                                        decoration: BoxDecoration(
+                                          color: r == selected
+                                              ? const Color(0xFF28a745)
+                                                  .withValues(alpha: 0.12)
+                                              : AppConstants.bgColor,
+                                          borderRadius:
+                                              BorderRadius.circular(14),
+                                          border: Border.all(
+                                            color: r == selected
+                                                ? const Color(0xFF28a745)
+                                                : AppConstants.dividerColor,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          r,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            color: r == selected
+                                                ? const Color(0xFF28a745)
+                                                : AppConstants.textPrimary,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ))
+                            .toList(),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    TextField(
+                      decoration: const InputDecoration(
+                        hintText: '搜索供货商',
+                        prefixIcon: Icon(Icons.search),
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (v) => setSheetState(() => keyword = v),
+                    ),
+                    const SizedBox(height: 8),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 320),
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: filtered.isEmpty
+                            ? const [
+                                Padding(
+                                  padding: EdgeInsets.all(16),
+                                  child: Text('无匹配供货商',
+                                      style: TextStyle(
+                                          color: AppConstants.textSecondary)),
+                                ),
+                              ]
+                            : filtered
+                                .map((o) => ListTile(
+                                      dense: true,
+                                      leading: Icon(
+                                        o == selected
+                                            ? Icons.radio_button_checked
+                                            : Icons.radio_button_off,
+                                        color: o == selected
+                                            ? const Color(0xFF28a745)
+                                            : AppConstants.textSecondary,
+                                      ),
+                                      title: Text(o,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis),
+                                      selected: o == selected,
+                                      onTap: () =>
+                                          setSheetState(() => selected = o),
+                                    ))
+                                .toList(),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppConstants.primaryColor,
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: selected.isEmpty
+                            ? null
+                            : () => Navigator.pop(ctx, selected),
+                        child: const Text('确定'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
   Widget _buildShopDropdown() {
     final configSuppliers = widget.service.suppliers;
     final options = <String>[...configSuppliers];
@@ -1577,19 +1947,48 @@ class _BookingFormState extends State<_BookingForm> {
       options.insert(0, _selectedShop!);
     }
 
-    return DropdownButtonFormField<String>(
-      value: _selectedShop != null && options.contains(_selectedShop)
-          ? _selectedShop
-          : null,
-      decoration: _inputDecoration(hint: '-- (选填) --'),
-      isExpanded: true,
-      items: options.map((s) {
-        return DropdownMenuItem(value: s, child: Text(s));
-      }).toList(),
-      onChanged: (v) => setState(() {
-        _selectedShop = v;
-        _shopCtrl.text = v ?? '';
-      }),
+    return FormField<String>(
+      initialValue: _selectedShop,
+      builder: (field) {
+        final text = _selectedShop ?? '';
+        return InkWell(
+          onTap: () async {
+            final picked = await _pickSupplier(options);
+            if (picked == null || picked.isEmpty) return;
+            // 记一笔最近选择（最多留 5 个），下次直接点
+            unawaited(ConfigService.addRecentSupplier(picked));
+            setState(() {
+              _selectedShop = picked;
+              _shopCtrl.text = picked;
+            });
+            field.didChange(picked);
+          },
+          child: InputDecorator(
+            decoration:
+                _inputDecoration().copyWith(errorText: field.errorText),
+            isEmpty: text.isEmpty,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    text.isEmpty ? '-- (选填) --' : text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: text.isEmpty
+                          ? AppConstants.textSecondary
+                          : AppConstants.textPrimary,
+                    ),
+                  ),
+                ),
+                const Icon(Icons.arrow_drop_down,
+                    color: AppConstants.textSecondary),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 

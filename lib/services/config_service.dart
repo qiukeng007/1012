@@ -50,6 +50,51 @@ class ConfigService {
     return prefs.getString(_restockConfigKeyLegacy);
   }
 
+  /// 最近选过的供货商（最新在前，最多 5 个），按登录模式各存一份：
+  /// 查询页点供货商时放在最上面直接点，省得在长列表里翻。
+  static const int recentSupplierMax = 5;
+  static const _recentSupplierKeyHq = 'recent_suppliers_hq';
+  static const _recentSupplierKeyStore = 'recent_suppliers_store';
+
+  static Future<String> _recentSupplierKey() async {
+    await ModeService.instance.ensureLoaded();
+    return ModeService.instance.isStoreMode
+        ? _recentSupplierKeyStore
+        : _recentSupplierKeyHq;
+  }
+
+  /// 读取最近选择过的供货商（最新在前）
+  static Future<List<String>> loadRecentSuppliers() async {
+    final key = await _recentSupplierKey();
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(key);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      return (jsonDecode(raw) as List<dynamic>)
+          .map((e) => e.toString())
+          .where((e) => e.trim().isNotEmpty)
+          .take(recentSupplierMax)
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// 记一次供货商选择（去重、最新在前、只留 5 个）
+  static Future<void> addRecentSupplier(String name) async {
+    final n = name.trim();
+    if (n.isEmpty) return;
+    final key = await _recentSupplierKey();
+    final list = [...await loadRecentSuppliers()];
+    list.removeWhere((e) => e == n);
+    list.insert(0, n);
+    if (list.length > recentSupplierMax) {
+      list.removeRange(recentSupplierMax, list.length);
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(key, jsonEncode(list));
+  }
+
   /// 按当前登录模式写入补货配置原始 JSON
   static Future<void> writeRestockJson(String json) async {
     final prefs = await SharedPreferences.getInstance();
@@ -419,6 +464,8 @@ class ConfigService {
     await prefs.remove(_restockConfigKeyHq);
     await prefs.remove(_restockConfigKeyStore);
     await prefs.remove(_restockConfigKeyLegacy);
+    await prefs.remove(_recentSupplierKeyHq);
+    await prefs.remove(_recentSupplierKeyStore);
     await prefs.remove(_printerConfigKeyHq);
     await prefs.remove(_printerConfigKeyStore);
     await prefs.remove(_printerConfigKeyLegacy);

@@ -10,8 +10,11 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
+import '../models/keepalive_log.dart';
 import '../models/store_config.dart';
 import '../utils/image_quality.dart';
+import 'foreground_service.dart';
+import 'keepalive_logger.dart';
 import 'product_image_cache.dart';
 import 'query_service.dart';
 
@@ -211,6 +214,8 @@ class PhotoQueueService {
   /// 运行中已被新任务取代的任务 id：worker 内存态可能落后于磁盘标记，
   /// 需以此集合为准，避免旧任务继续跑完剩余门店。
   final Set<String> _cancelledIds = <String>{};
+  /// 上传期间是否已申请省电锁（true=锁屏也让 CPU/Wi-Fi 继续跑）
+  bool _uploadWakeOn = false;
 
   ChangeNotifier get notifier => _notifier;
   Stream<PhotoJobEvent> get events => _events.stream;
@@ -468,7 +473,43 @@ class PhotoQueueService {
   }
   // ==================== 后台处理 ====================
 
+  /// 上传开始/结束时申请或释放省电锁。
+  /// 不申请的话，屏幕一灭 CPU 就休眠，传输会被推迟到下次亮屏，
+  /// 表现就是「锁屏以后照片根本没在传」。
+  Future<void> _setUploadWake(bool on) async {
+    if (!on && !_uploadWakeOn) return;
+    final changed = _uploadWakeOn != on;
+    _uploadWakeOn = on;
+    // on=true 时每跑一条任务都重新申请一次（续期）：
+    // 原生那把锁 15 分钟会自动过期，不续期的话长队列传到一半就没保护了。
+    final ok = await ForegroundService.setUploading(on);
+    if (!changed) return;
+    String detail;
+    if (on) {
+      detail = ok
+          ? '开始上传照片：已申请省电锁（锁屏后也继续传）'
+          : '开始上传照片：申请省电锁没生效（原生侧返回失败）';
+    } else {
+      detail = '照片队列暂空：已释放省电锁';
+    }
+    unawaited(KeepAliveLogger().add(KeepAliveLogEntry(
+      timestamp: DateTime.now(),
+      event: on ? 'upload_wake_on' : 'upload_wake_off',
+      detail: detail,
+      success: on ? ok : true,
+    )));
+  }
+
   Future<void> _pumpLoop() async {
+    try {
+      await _pumpLoopInner();
+    } finally {
+      // 队列空了/退出了：立刻把省电锁放掉，不白耗电
+      await _setUploadWake(false);
+    }
+  }
+
+  Future<void> _pumpLoopInner() async {
     while (_pumping) {
       // 一条任务出意外（网络库异常、文件坏了等）不能让整条队列停摆：
       // 记下原因、按一次失败计次退避，然后继续跑下一条。
@@ -537,6 +578,7 @@ class PhotoQueueService {
         final fresh = await _loadQueueJob(todo.id);
         if (fresh == null) continue; // 文件已被删除（合并/删除）
         if (fresh.superseded) _cancelledIds.add(fresh.id);
+        await _setUploadWake(true);
         await _processJob(qs, fresh);
         runningId = null;
       } catch (e) {
@@ -1231,11 +1273,31 @@ class PhotoJob {
     this.lastError,
   });
 
-  /// 真正干活的时间 = 各门店耗时之和。
-  /// 不含重试退避、也不含 App 被系统挂起的那段——
-  /// 以前用「首次开始处理 → 完成」，这两段会被算进去，
-  /// 出现「各店加起来 26 秒、日志显示 64 分钟」这种虚高。
+  /// 真正干活的时间 = 最后一次尝试各门店耗时之和。
+  /// 注意：只统计最后一次尝试，前面的失败尝试（比如 4 个店各卡满 60 秒超时）
+  /// 不在这里，所以它比用户感知的短，只能当「干活快不快」的参考。
   int get workMs => results.fold<int>(0, (sum, r) => sum + r.wallMs);
+
+  /// 真实耗时 = 首次开始处理 → 完成。
+  /// 含重试等待、含锁屏被挂起的时间——用户感知的就是这一段。
+  /// （以前的显示口径只用各店耗时之和，实际等了 2 分多钟却显示 1 分钟，
+  ///  被当成假数据；排队等待仍然不算在里面。）
+  int get realMs {
+    final start = DateTime.tryParse(startedAt ?? '');
+    final end = DateTime.tryParse(finishedAt ?? '');
+    if (start != null && end != null) {
+      final ms = end.difference(start).inMilliseconds;
+      if (ms > 0) return ms;
+    }
+    return workMs;
+  }
+
+  /// 时长文本：秒 / 分钟
+  static String fmtMs(int ms) {
+    if (ms <= 0) return '0.0 秒';
+    if (ms < 60000) return '${(ms / 1000).toStringAsFixed(1)} 秒';
+    return '${(ms / 60000).toStringAsFixed(1)} 分钟';
+  }
 
   /// 展示用耗时：跑完的显示真实干活时间；没跑完的直接说明当前状态，
   /// 不再显示一个一直往上涨的数字（看着像卡死）。
@@ -1245,17 +1307,20 @@ class PhotoJob {
       if (attempts > 0) return '第 $attempts 次失败，等重试';
       return '等待处理';
     }
-    var ms = workMs;
-    if (ms <= 0) {
-      final start = DateTime.tryParse(startedAt ?? '');
-      final end = DateTime.tryParse(finishedAt ?? '');
-      if (start != null && end != null) {
-        ms = end.difference(start).inMilliseconds;
-      }
-    }
+    final ms = realMs;
     if (ms <= 0) return '0.0 秒';
-    if (ms < 60000) return '${(ms / 1000).toStringAsFixed(1)} 秒';
-    return '${(ms / 60000).toStringAsFixed(1)} 分钟';
+    return fmtMs(ms);
+  }
+
+  /// 真实耗时里「真正在传」的那一小段，用来区分「等了很久」还是「传得慢」
+  String get workSplitText {
+    if (finishedAt == null) return '';
+    final total = realMs;
+    final work = workMs;
+    if (total <= 0 || work <= 0) return '';
+    final idle = total - work;
+    if (idle <= 0) return '';
+    return '其中真正在传 ${fmtMs(work)}，等待重试/锁屏挂起 ${fmtMs(idle)}';
   }
 
   bool get canRetryNow {

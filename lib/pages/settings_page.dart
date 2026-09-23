@@ -16,6 +16,7 @@ import '../services/photo_queue_service.dart';
 import '../services/session_manager.dart';
 import '../services/query_logger.dart';
 import '../services/keepalive_logger.dart';
+import '../services/foreground_service.dart';
 import '../services/usage_log_service.dart';
 import '../services/mode_service.dart';
 import '../widgets/config_form.dart';
@@ -94,12 +95,15 @@ class _SettingsPageState extends State<SettingsPage> {
   final TextEditingController _photoFilterCtrl = TextEditingController();
   String _photoFilter = '';
   bool _photoShowAll = false;
+  // 电池优化白名单状态（保活用：不在白名单里，锁屏后系统可能冻结 App）
+  Future<bool>? _batteryOptFuture;
 
   @override
   void initState() {
     super.initState();
     PhotoQueueService.instance.addListener(_reloadPhotoJobs);
     _reloadPhotoJobs();
+    _batteryOptFuture = ForegroundService.isIgnoringBatteryOptimizations();
     _initMode();
   }
 
@@ -1127,12 +1131,12 @@ class _SettingsPageState extends State<SettingsPage> {
           '记录数: ${jobs.length} 条（配置页保留最近 ${PhotoQueueService.historyCap} 条）');
       buf.writeln('');
       buf.writeln('说明（字段口径）:');
-      buf.writeln('  实际处理 = 各门店耗时之和（真正干活的时间）');
-      buf.writeln('  排队等待 = 创建时间 → 首次开始处理，单独标注，不计入实际处理');
-      buf.writeln('  重试退避、App 被系统挂起的时间都不算进实际处理（以前会算，导致虚高）');
+      buf.writeln('  实际处理 = 首次开始处理 → 完成（真实花了多久，含重试等待和锁屏挂起）');
+      buf.writeln('  其中真正在传 / 等待重试 = 把实际处理拆成两段，看它到底慢在哪');
+      buf.writeln('  排队等待 = 创建时间 → 首次开始处理，单纯排队，不算进实际处理');
       buf.writeln('  没跑完的任务不显示时长，直接写当前状态（等重试 / 等待登录）');
       buf.writeln('  上次失败 = 这条上一次尝试失败的原因（重试成功后也能看到为什么重试过）');
-      buf.writeln('  单店耗时/分步耗时 = 该门店这一步自己花的时间');
+      buf.writeln('  单店耗时/分步耗时 = 该门店这一步自己花的时间（只统计最后一次尝试）');
       buf.writeln('');
       buf.writeln('=== 记录（最新在前） ===');
       for (var i = 0; i < jobs.length; i++) {
@@ -1140,9 +1144,8 @@ class _SettingsPageState extends State<SettingsPage> {
         final started = DateTime.tryParse(job.startedAt ?? '');
         final finished = DateTime.tryParse(job.finishedAt ?? '');
         final waitMs = started?.difference(job.createdAt).inMilliseconds;
-        // 实际处理 = 各门店耗时之和（job.elapsedText 里算）。
-        // 不再用「首次开始处理 → 完成」：那会把重试退避、App 被挂起的
-        // 时间也算进去，出现「各店合计 26 秒、日志显示 64 分钟」的虚高。
+        // 实际处理 = 首次开始处理 → 完成（真实耗时，含重试与锁屏挂起）。
+        // 以前只写「各店耗时之和」，实际等了 2 分多钟却显示 1 分钟，被当成假数据。
         final runText = job.elapsedText;
         buf.writeln('');
         buf.writeln('[$i] ${job.type.label} · 条码 ${job.barcode}'
@@ -1158,6 +1161,10 @@ class _SettingsPageState extends State<SettingsPage> {
         }
         buf.writeln('    实际处理: $runText'
             '${waitMs != null && waitMs > 0 ? '（另有排队等待 ${_fmtDur(waitMs)}，不计入）' : ''}');
+        final splitText = job.workSplitText;
+        if (splitText.isNotEmpty) {
+          buf.writeln('    $splitText');
+        }
         if ((job.lastError ?? '').isNotEmpty) {
           buf.writeln('    上次失败: ${job.lastError}');
         }
@@ -2161,45 +2168,59 @@ class _SettingsPageState extends State<SettingsPage> {
             style: TextStyle(fontSize: 13, color: AppConstants.textSecondary)),
         const SizedBox(width: 6),
         Expanded(
-          child: DropdownButton<String>(
-            value: _activeProfile,
-            isExpanded: true,
-            underline: const SizedBox(),
-            style: const TextStyle(
-                fontSize: 13,
-                color: AppConstants.primaryColor,
-                fontWeight: FontWeight.w600),
-            items: _printerProfiles
-                .map((p) => DropdownMenuItem(value: p, child: Text(p)))
-                .toList(),
-            onChanged: (v) async {
-              if (v == null || v == _activeProfile) return;
-              // 先保存当前IP到当前profile
-              await widget.configService.savePrinterConfigs(_printerConfigs);
-              // 切换到新profile
-              await widget.configService.setActiveProfile(v);
-              final newConfigs =
-                  await widget.configService.loadPrinterConfigs();
-              setState(() {
-                _activeProfile = v;
-                _printerConfigs = newConfigs;
-              });
-              // 通知 HomePage 重新加载打印机配置，否则查询页显示的还是旧数据
-              widget.onConfigChanged?.call();
-            },
+          child: Container(
+            // 场地这个下拉本身撑高到 48dp 以上：只有一行字那么矮的时候点不中
+            constraints: const BoxConstraints(minHeight: 48),
+            alignment: Alignment.centerLeft,
+            child: DropdownButton<String>(
+              value: _activeProfile,
+              isExpanded: true,
+              isDense: false,
+              underline: const SizedBox(),
+              style: const TextStyle(
+                  fontSize: 13,
+                  color: AppConstants.primaryColor,
+                  fontWeight: FontWeight.w600),
+              items: _printerProfiles
+                  .map((p) => DropdownMenuItem(value: p, child: Text(p)))
+                  .toList(),
+              onChanged: (v) async {
+                if (v == null || v == _activeProfile) return;
+                // 先保存当前IP到当前profile
+                await widget.configService.savePrinterConfigs(_printerConfigs);
+                // 切换到新profile
+                await widget.configService.setActiveProfile(v);
+                final newConfigs =
+                    await widget.configService.loadPrinterConfigs();
+                setState(() {
+                  _activeProfile = v;
+                  _printerConfigs = newConfigs;
+                });
+                // 通知 HomePage 重新加载打印机配置，否则查询页显示的还是旧数据
+                widget.onConfigChanged?.call();
+              },
+            ),
           ),
         ),
         const SizedBox(width: 4),
         GestureDetector(
+          behavior: HitTestBehavior.opaque,
           onTap: () => _renameProfile(),
-          child: const Icon(Icons.edit,
-              size: 16, color: AppConstants.textSecondary),
+          child: const Padding(
+            padding: EdgeInsets.all(10),
+            child: Icon(Icons.edit,
+                size: 18, color: AppConstants.textSecondary),
+          ),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: 2),
         GestureDetector(
+          behavior: HitTestBehavior.opaque,
           onTap: () => _createProfile(),
-          child: const Icon(Icons.add_circle_outline,
-              size: 16, color: AppConstants.primaryColor),
+          child: const Padding(
+            padding: EdgeInsets.all(10),
+            child: Icon(Icons.add_circle_outline,
+                size: 18, color: AppConstants.primaryColor),
+          ),
         ),
       ],
     );
@@ -2583,22 +2604,27 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 8),
               // 展开/收起
               GestureDetector(
+                behavior: HitTestBehavior.opaque,
                 onTap: () => setState(() => _diagExpanded = !_diagExpanded),
-                child: Row(
-                  children: [
-                    Icon(
-                      _diagExpanded ? Icons.expand_less : Icons.expand_more,
-                      size: 16,
-                      color: AppConstants.primaryColor,
-                    ),
-                    Text(
-                      _diagExpanded
-                          ? '收起详情'
-                          : '展开最近 ${_diagLogs.length > 20 ? 20 : _diagLogs.length} 条记录',
-                      style: const TextStyle(
-                          fontSize: 12, color: AppConstants.primaryColor),
-                    ),
-                  ],
+                child: SizedBox(
+                  // 整行 48dp 热区：16px 的箭头单独去点，十下中一下
+                  height: 48,
+                  child: Row(
+                    children: [
+                      Icon(
+                        _diagExpanded ? Icons.expand_less : Icons.expand_more,
+                        size: 26,
+                        color: AppConstants.primaryColor,
+                      ),
+                      Text(
+                        _diagExpanded
+                            ? '收起详情'
+                            : '展开最近 ${_diagLogs.length > 20 ? 20 : _diagLogs.length} 条记录',
+                        style: const TextStyle(
+                            fontSize: 13, color: AppConstants.primaryColor),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               if (_diagExpanded) ...[
@@ -2717,13 +2743,71 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             const SizedBox(height: 4),
             const Text(
-              '记录前台服务启动/停止/失败，帮助诊断后台保活问题',
+              '记录前台服务启动/停止/失败、上传省电锁的开关，帮助诊断后台保活问题',
               style: TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+            const SizedBox(height: 8),
+            FutureBuilder<bool>(
+              future: _batteryOptFuture,
+              builder: (ctx, snap) {
+                final ignoring = snap.data;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      ignoring == null
+                          ? '电池优化白名单: 检测中…'
+                          : (ignoring
+                              ? '电池优化白名单: 已加入（锁屏后不会被系统冻结）'
+                              : '电池优化白名单: 未加入（锁屏后系统可能冻结 App，照片会停传）'),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: ignoring == false
+                            ? AppConstants.warningColor
+                            : Colors.grey,
+                      ),
+                    ),
+                    if (ignoring == false) ...[
+                      const SizedBox(height: 6),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton(
+                          onPressed: _requestBatteryWhitelist,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: AppConstants.primaryColor,
+                            side: BorderSide(
+                                color: AppConstants.primaryColor),
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                          ),
+                          child: const Text('加入电池优化白名单',
+                              style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                    ],
+                  ],
+                );
+              },
             ),
           ],
         ),
       ),
     );
+  }
+
+  /// 申请把本 App 加入电池优化白名单：不在白名单里，锁屏后系统可能直接冻结，
+  /// 照片队列就会停在上传中途（国内 ROM 尤其明显）
+  Future<void> _requestBatteryWhitelist() async {
+    final ok = await ForegroundService.requestIgnoreBatteryOptimizations();
+    if (!mounted) return;
+    setState(() {
+      _batteryOptFuture = ForegroundService.isIgnoringBatteryOptimizations();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok
+          ? '已打开系统设置，请选「允许」或「不受限制」；回来后这一行会变成已加入'
+          : '系统没有响应这个请求，请手动去 设置 > 应用 > 银豹查询 > 电池，选「不受限制」'),
+      duration: const Duration(seconds: 6),
+    ));
   }
 
   /// 高级设置按钮（放在配置页底部）

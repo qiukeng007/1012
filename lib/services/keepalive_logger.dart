@@ -69,9 +69,13 @@ class KeepAliveLogger {
     try {
       final running = await ForegroundService.isRunning();
       final notifEnabled = await ForegroundService.isNotificationEnabled();
+      final uploadWake = await ForegroundService.uploadWakeHeld();
+      final battOk = await ForegroundService.isIgnoringBatteryOptimizations();
       buf.writeln('▶ 当前状态:');
       buf.writeln('  前台服务: ${running ? '✓ 运行中' : '✗ 已停止'}');
       buf.writeln('  通知权限: ${notifEnabled ? '✓ 已授权' : '✗ 未授权 (请去设置>应用>银豹查询>通知 打开)'}');
+      buf.writeln('  上传省电锁: ${uploadWake ? '✓ 持有中（屏幕灭了也在传）' : '— 未持有（队列空闲时正常）'}');
+      buf.writeln('  电池优化白名单: ${battOk ? '✓ 已加入' : '✗ 未加入 (锁屏后可能被系统冻结，去配置页点「加入电池优化白名单」)'}');
       buf.writeln('');
     } catch (_) {
       buf.writeln('▶ 当前状态: 无法检测');

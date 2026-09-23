@@ -39,9 +39,38 @@ class KeepAliveService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * 自愈守护：每隔一会儿看一眼「通知监听」还在不在。
+     * 装完新包、被系统省电清理之后，监听常被静默解绑（界面上看不出来），
+     * 这里每 15 秒喊系统重新绑一次，用户不用自己去开 App。
+     */
+    private val guardHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val guard = object : Runnable {
+        override fun run() {
+            try {
+                if (NotifyListenerService.isEnabled(this@KeepAliveService) &&
+                    !NotifyListenerService.isConnected()
+                ) {
+                    android.service.notification.NotificationListenerService.requestRebind(
+                        android.content.ComponentName(
+                            this@KeepAliveService, NotifyListenerService::class.java
+                        )
+                    )
+                }
+                // 息屏期间给语音引擎热身：它被系统冻住的话，通知要等亮屏才念得出来
+                if (!NotifyConfig.screenOnNow(this@KeepAliveService)) {
+                    NotifyVoice.warmUp()
+                }
+            } catch (_: Throwable) {
+            }
+            guardHandler.postDelayed(this, 15000L)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        guardHandler.postDelayed(guard, 5000L)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -58,6 +87,10 @@ class KeepAliveService : Service() {
 
     override fun onDestroy() {
         running = false
+        try {
+            guardHandler.removeCallbacks(guard)
+        } catch (_: Throwable) {
+        }
         super.onDestroy()
     }
 

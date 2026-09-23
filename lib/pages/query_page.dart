@@ -2806,7 +2806,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   }
 
   /// 点击结果卡片的供货商，弹出选择框更换供货商并同步到银豹
-  void _showSupplierPicker(ProductData data, String current) {
+  Future<void> _showSupplierPicker(ProductData data, String current) async {
     // 高级设置里关掉了：入口图标已经不显示，这里静默忽略，不再弹提示
     if (!AdvancedSettingsService.instance.allowSupplier) return;
     final options = widget.supplierOptions;
@@ -2814,6 +2814,14 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       _showBanner('暂无供货商列表，请先在配置页同步/添加供货商', isError: true);
       return;
     }
+    // 最近选过的 5 个供货商：放在最上面直接点，不用在长列表里一个个找。
+    // 已经被删掉的供货商不显示（以当前列表为准）。
+    var recents = const <String>[];
+    try {
+      final saved = await ConfigService.loadRecentSuppliers();
+      recents = saved.where(options.contains).toList();
+    } catch (_) {}
+    if (!mounted) return;
     String selected = current;
     showModalBottomSheet(
       context: context,
@@ -2822,6 +2830,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         var keyword = '';
         return StatefulBuilder(
           builder: (ctx, setSheetState) {
+            // 供货商名字可能很长：最近选择的按钮最多占半行，超出省略，
+            // 长按能看到全称（下面的列表一直是全称）
+            final chipMaxW = (MediaQuery.of(ctx).size.width - 32) / 2 - 6;
             final filtered = keyword.trim().isEmpty
                 ? options
                 : options.where((o) => o.contains(keyword.trim())).toList();
@@ -2849,6 +2860,66 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                           style: const TextStyle(fontSize: 13, color: AppConstants.textSecondary),
                         ),
                       ),
+                    if (recents.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Row(
+                        children: const [
+                          Icon(Icons.history,
+                              size: 14, color: AppConstants.textSecondary),
+                          SizedBox(width: 4),
+                          Text('最近选择',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: AppConstants.textSecondary)),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: recents
+                            .map((r) => Tooltip(
+                                  message: r,
+                                  child: GestureDetector(
+                                    onTap: () =>
+                                        setSheetState(() => selected = r),
+                                    child: ConstrainedBox(
+                                      constraints:
+                                          BoxConstraints(maxWidth: chipMaxW),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 10, vertical: 6),
+                                        decoration: BoxDecoration(
+                                          color: r == selected
+                                              ? const Color(0xFF28a745)
+                                                  .withValues(alpha: 0.12)
+                                              : AppConstants.bgColor,
+                                          borderRadius:
+                                              BorderRadius.circular(14),
+                                          border: Border.all(
+                                            color: r == selected
+                                                ? const Color(0xFF28a745)
+                                                : AppConstants.dividerColor,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          r,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            color: r == selected
+                                                ? const Color(0xFF28a745)
+                                                : AppConstants.textPrimary,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ))
+                            .toList(),
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     TextField(
                       decoration: const InputDecoration(
@@ -2958,6 +3029,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       _showBanner('供货商未变化');
       return;
     }
+    // 记一笔最近选择（最多留 5 个），下次点供货商可以直接点
+    unawaited(ConfigService.addRecentSupplier(newSupplier));
     final opName = await _ensureOperatorName();
     if (opName == null) {
       _showBanner('请填写操作员姓名后再更新供货商', isError: true);
