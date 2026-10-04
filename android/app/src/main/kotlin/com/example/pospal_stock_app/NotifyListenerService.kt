@@ -32,8 +32,69 @@ class NotifyListenerService : NotificationListenerService() {
         @Volatile
         private var sink: ((String) -> Unit)? = null
 
+        /** 上次做「重活」（写组件状态）的时间：太频繁会刷一堆 PACKAGE_CHANGED 广播 */
+        @Volatile
+        private var lastHeavyAt = 0L
+
         /** 监听服务到底连上了没（权限开着也可能没连上，装完新包经常这样） */
         fun isConnected(): Boolean = connected
+
+        /**
+         * 尽最大力气把自己接回系统。
+         *
+         * 真机实测（OPPO / Android 16）：被强停过之后，标准 API
+         * NotificationListenerService.requestRebind() 一点反应都没有 ——
+         * 「通知使用权」名单里明明有我们，系统就是不绑（只有用户自己去系统设置
+         * 里关掉再打开才会绑回来）。所以这里加码：把组件状态显式写一遍
+         * （先 DEFAULT 再 ENABLED，组件全程都是启用的，没有禁用窗口），
+         * 让系统收到一次「这个包变了」，从而重新登记、重新绑定监听。
+         */
+        fun hardReconnect(ctx: Context): String {
+            val cn = ComponentName(ctx, NotifyListenerService::class.java)
+            val sb = StringBuilder()
+            sb.append("rebind=")
+            sb.append(
+                try {
+                    NotificationListenerService.requestRebind(cn)
+                    "ok"
+                } catch (t: Throwable) {
+                    "err:" + t.message
+                }
+            )
+            val now = System.currentTimeMillis()
+            val heavy = now - lastHeavyAt > 20000L
+            sb.append(" component=")
+            if (!heavy) {
+                // 20 秒内已经写过一次了，这次只喊 requestRebind
+                sb.append("skipped")
+            } else {
+                lastHeavyAt = now
+                sb.append(
+                    try {
+                        val pm = ctx.packageManager
+                        pm.setComponentEnabledSetting(
+                            cn,
+                            android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+                            android.content.pm.PackageManager.DONT_KILL_APP
+                        )
+                        pm.setComponentEnabledSetting(
+                            cn,
+                            android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                            android.content.pm.PackageManager.DONT_KILL_APP
+                        )
+                        "ok"
+                    } catch (t: Throwable) {
+                        "err:" + t.message
+                    }
+                )
+            }
+            sb.append(" enabled=")
+            sb.append(isEnabled(ctx))
+            sb.append(" connected=")
+            sb.append(connected)
+            android.util.Log.i("PospalListener", "hardReconnect: " + sb)
+            return sb.toString()
+        }
 
         fun setSink(f: ((String) -> Unit)?) {
             sink = f
@@ -171,8 +232,9 @@ class NotifyListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         connected = true
-        // 保活前台服务一起拉起来：有它挂着，系统不会把 App 冻掉，
-        // 语音引擎也就能一直保持「就绪」，锁屏时来通知才念得出来。
+        // 保活前台服务：有它挂着，系统不会把 App 冻掉，语音引擎也就能一直
+        // 保持「就绪」，锁屏时来通知才念得出来。常驻挂着 —— 状态栏一直看得到
+        // 「保持在线」图标（低优先级、静音，不会响也不会弹横幅）。
         try {
             KeepAliveService.start(this)
         } catch (_: Throwable) {
@@ -190,11 +252,27 @@ class NotifyListenerService : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         connected = false
-        // 被系统解绑后主动要求重连（进程被回收时系统也会重新绑定）
-        try {
-            requestRebind(ComponentName(this, NotifyListenerService::class.java))
-        } catch (_: Throwable) {
+        // 被系统解绑后主动要求重连（进程被回收时系统也会重新绑定）。
+        // 立刻喊往往不生效：隔 3 秒再喊，之后每 5 秒一轮，直到连上为止 ——
+        // 省得用户自己进页面点「重连」。
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        var tries = 0
+        val again = object : Runnable {
+            override fun run() {
+                if (connected) return
+                try {
+                    requestRebind(
+                        ComponentName(
+                            this@NotifyListenerService, NotifyListenerService::class.java
+                        )
+                    )
+                } catch (_: Throwable) {
+                }
+                tries++
+                if (tries < 12) handler.postDelayed(this, 5000L)
+            }
         }
+        handler.postDelayed(again, 3000L)
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
@@ -281,7 +359,7 @@ class NotifyListenerService : NotificationListenerService() {
         val justLit = NotifyConfig.screenJustLit()
         val inUseNow = NotifyConfig.inUseNow(this)
         val screenBlocked = !screenPolicyOn && inUseNow
-        val speakOn = sp.getBoolean(NotifyConfig.KEY_SPEAK, true) &&
+        val speakOn = sp.getBoolean(NotifyConfig.KEY_SPEAK, false) &&
             skipped == null && !outOfWindow && !screenBlocked
 
         val obj = JSONObject()

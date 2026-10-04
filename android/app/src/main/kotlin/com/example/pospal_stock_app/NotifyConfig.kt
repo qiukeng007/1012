@@ -30,6 +30,8 @@ object NotifyConfig {
     const val KEY_APP_MODE = "app_mode"
     /** 勾选的应用包名，逗号分隔 */
     const val KEY_APPS = "app_list"
+    /** 「播报默认关」的一次性迁移标记 */
+    const val MIGRATED_SPEAK_OFF = "speak_off_migrated_v1"
 
     const val HISTORY_FILE = "notify_history.log"
     const val HISTORY_MAX = 200
@@ -242,10 +244,24 @@ object NotifyConfig {
     /** 现在这一刻收到通知，会不会念（给页面上那行自检用） */
     fun willSpeakNow(ctx: Context): Boolean {
         val sp = prefs(ctx)
-        if (!sp.getBoolean(KEY_SPEAK, true)) return false
+        if (!sp.getBoolean(KEY_SPEAK, false)) return false
         if (!inActiveWindow(ctx)) return false
         if (!sp.getBoolean(KEY_SCREEN_ON, false) && inUseNow(ctx)) return false
         return true
+    }
+
+    /**
+     * 一次性迁移：这一版起「语音播报」默认是关的。
+     * 老版本默认开着 —— 用户从没点过那个开关，App 一起来就在播报。
+     * 升级后强制关一次；之后再开/再关，完全按用户自己的选择走。
+     */
+    fun migrateSpeakOff(ctx: Context) {
+        val sp = prefs(ctx)
+        if (sp.getBoolean(MIGRATED_SPEAK_OFF, false)) return
+        sp.edit()
+            .putBoolean(KEY_SPEAK, false)
+            .putBoolean(MIGRATED_SPEAK_OFF, true)
+            .apply()
     }
 
     fun toJson(ctx: Context): String {
@@ -253,7 +269,7 @@ object NotifyConfig {
         val apps = JSONArray()
         appList(ctx).forEach { apps.put(it) }
         val o = JSONObject()
-        o.put(KEY_SPEAK, sp.getBoolean(KEY_SPEAK, true))
+        o.put(KEY_SPEAK, sp.getBoolean(KEY_SPEAK, false))
         o.put(KEY_RATE, sp.getFloat(KEY_RATE, 1.0f).toDouble())
         o.put(KEY_ROUTE, sp.getInt(KEY_ROUTE, 0))
         o.put(KEY_SCREEN_ON, sp.getBoolean(KEY_SCREEN_ON, false))
@@ -277,7 +293,7 @@ object NotifyConfig {
             }
         }
         prefs(ctx).edit()
-            .putBoolean(KEY_SPEAK, o.optBoolean(KEY_SPEAK, true))
+            .putBoolean(KEY_SPEAK, o.optBoolean(KEY_SPEAK, false))
             .putFloat(KEY_RATE, o.optDouble(KEY_RATE, 1.0).toFloat())
             .putInt(KEY_ROUTE, o.optInt(KEY_ROUTE, 0))
             .putBoolean(KEY_SCREEN_ON, o.optBoolean(KEY_SCREEN_ON, false))

@@ -143,7 +143,8 @@ class NotifySettings {
   List<String> apps;
 
   NotifySettings({
-    this.speak = true,
+    // 默认关：没设置过的机器不能自己就开始播报，要用户按圆钮才开
+    this.speak = false,
     this.rate = 1.0,
     this.route = 0,
     this.speakWhenScreenOn = false,
@@ -169,7 +170,7 @@ class NotifySettings {
       };
 
   factory NotifySettings.fromJson(Map<String, dynamic> j) => NotifySettings(
-        speak: j['speak_enabled'] != false,
+        speak: j['speak_enabled'] == true,
         rate: (j['speak_rate'] as num?)?.toDouble() ?? 1.0,
         route: (j['speak_route'] as num?)?.toInt() ?? 0,
         speakWhenScreenOn: j['speak_screen_on'] == true,
@@ -215,8 +216,21 @@ class NotifyService {
   /// 还没看过的条数（底部红点用）
   final ValueNotifier<int> unread = ValueNotifier<int>(0);
 
+  /// 当前设置：通知页底部的运行条和「配置 → 通知播报」卡片都读这一份，
+  /// 免得两边各存一份、互相覆盖（在一边关了播报，另一边又给打开）
+  final ValueNotifier<NotifySettings> settings =
+      ValueNotifier<NotifySettings>(NotifySettings());
+
   StreamSubscription<dynamic>? _sub;
   bool _started = false;
+
+  /// 通知监听到底连上了没（授权开着也可能没连上，重启 App 后经常这样）
+  final ValueNotifier<bool> listenerConnected = ValueNotifier<bool>(false);
+  Timer? _connectWatch;
+  DateTime? _lastRebindAt;
+  int _rebindTries = 0;
+  /// 最后一次加码重连每一步的结果（排查用，播报诊断里会显示）
+  String lastReconnect = '';
 
   Future<void> start() async {
     if (_started) return;
@@ -227,6 +241,78 @@ class NotifyService {
     } catch (_) {}
     await refreshListenerEnabled();
     await loadHistory();
+    // 装完新包后安卓常常把通知监听的绑定解掉（表现就是「再也收不到通知」），
+    // 每次启动主动要求重连一次，能自己救回来
+    await rebindListener();
+    await refreshListenerEnabled();
+    // 标准 rebind 在这台机上经常完全没反应（系统就是不绑），几秒后还没连上
+    // 就走一遍加码重连（原生那边会把组件状态写一变，逼系统重新登记监听）
+    unawaited(Future<void>.delayed(const Duration(seconds: 3), _reconnectIfNeeded));
+    // 一次不够：重启 App 后系统经常隔一会儿才肯绑回来，这里自己盯着重连
+    _connectWatch ??= Timer.periodic(
+      const Duration(seconds: 3),
+      (_) => unawaited(_watchTick()),
+    );
+  }
+
+  /// 监听掉线就自己重连：没连上时每 3 秒喊一次（最多 20 次，约一分钟），
+  /// 之后转成 30 秒一轮的慢喊。连上以后什么都不做。
+  Future<void> _watchTick() async {
+    if (!supported) return;
+    try {
+      await refreshListenerEnabled();
+      if (!listenerEnabled.value) return;
+      if (listenerConnected.value) {
+        _rebindTries = 0;
+        return;
+      }
+      final now = DateTime.now();
+      final last = _lastRebindAt;
+      if (_rebindTries >= 20 &&
+          last != null &&
+          now.difference(last).inSeconds < 30) {
+        return;
+      }
+      _lastRebindAt = now;
+      _rebindTries++;
+      // 每 4 次插一次「加码」重连：光喊 requestRebind 在这台机上没有用
+      if (_rebindTries % 4 == 0) {
+        await forceReconnect();
+      } else {
+        await rebindListener();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _reconnectIfNeeded() async {
+    await refreshListenerEnabled();
+    if (listenerEnabled.value && !listenerConnected.value) {
+      await forceReconnect();
+    }
+  }
+
+  /// 加码重连：原生侧会走 requestRebind + 组件状态写一变，
+  /// 返回每一步的结果（放进诊断里，方便排查为什么没连上）
+  Future<String> forceReconnect() async {
+    if (!supported) return '';
+    try {
+      final info = await _ch.invokeMethod<String>('forceReconnect') ?? '';
+      lastReconnect = info;
+      return info;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// 主动检查一遍，没连上就立刻重连（切回前台、进通知页时用）
+  Future<void> ensureConnected() async {
+    if (!supported) return;
+    try {
+      await refreshListenerEnabled();
+      if (!listenerEnabled.value || listenerConnected.value) return;
+      await forceReconnect();
+      await refreshListenerEnabled();
+    } catch (_) {}
   }
 
   /// 装完新包/被系统解绑后，主动要求系统重新绑定通知监听
@@ -244,6 +330,8 @@ class NotifyService {
     try {
       final on = await _ch.invokeMethod<bool>('isListenerEnabled') ?? false;
       listenerEnabled.value = on;
+      final cn = await _ch.invokeMethod<bool>('isListenerConnected') ?? false;
+      listenerConnected.value = cn;
     } catch (_) {}
   }
 
@@ -284,14 +372,18 @@ class NotifyService {
   }
 
   Future<NotifySettings> loadSettings() async {
-    if (!supported) return NotifySettings();
+    if (!supported) return settings.value;
+    NotifySettings parsed;
     try {
       final raw = await _ch.invokeMethod<String>('getSettings') ?? '';
-      if (raw.isEmpty) return NotifySettings();
-      return NotifySettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+      parsed = raw.isEmpty
+          ? NotifySettings()
+          : NotifySettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
     } catch (_) {
-      return NotifySettings();
+      parsed = NotifySettings();
     }
+    settings.value = parsed;
+    return parsed;
   }
 
   Future<void> saveSettings(NotifySettings s) async {
@@ -300,6 +392,8 @@ class NotifyService {
       await _ch.invokeMethod<bool>('setSettings',
           {'json': jsonEncode(s.toJson())});
     } catch (_) {}
+    // 换成一份副本：界面上的开关跟着这一份走，存完立刻能反映出来
+    settings.value = NotifySettings.fromJson(s.toJson());
   }
 
   /// 现在这一刻的状态：屏幕亮不亮、会不会念（页面上那行自检用）
@@ -405,6 +499,8 @@ class NotifyService {
   void dispose() {
     _sub?.cancel();
     _sub = null;
+    _connectWatch?.cancel();
+    _connectWatch = null;
     _started = false;
   }
 }

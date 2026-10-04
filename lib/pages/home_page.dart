@@ -106,7 +106,7 @@ class _HomePageState extends State<HomePage>
   /// 底部铃铛旁边那个状态点：权限开了没、监听连着没、语音播报开着没
   bool _notifyEnabled = false;
   bool _notifyConnected = false;
-  bool _notifySpeak = true;
+  bool _notifySpeak = false;
   Timer? _notifyDotTimer;
   final ValueNotifier<({String barcode, String imageUrl})?>
       _restockImageNotifier = ValueNotifier(null);
@@ -130,6 +130,9 @@ class _HomePageState extends State<HomePage>
     // 通知权限小绿点：进页面先查一次，之后在前台每 5 秒看一眼
     unawaited(_refreshNotifyDot());
     _startNotifyDotTimer();
+    // 保活服务一直挂着（前台也挂）—— 状态栏常驻「保持在线」图标，
+    // 语音引擎和通知监听也不会被系统冻掉
+    unawaited(ForegroundService.start());
   }
 
   @override
@@ -150,9 +153,9 @@ class _HomePageState extends State<HomePage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (_loading) return;
     switch (state) {
+      case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
-      case AppLifecycleState.inactive:
-        // App 进入后台 → 启动前台服务保活
+        // App 真的不在前台了 → 启动前台服务保活
         _notifyDotTimer?.cancel();
         _notifyDotTimer = null;
         final fgNow = DateTime.now();
@@ -170,21 +173,22 @@ class _HomePageState extends State<HomePage>
           }
         });
         break;
+      case AppLifecycleState.inactive:
+        // 只是失了焦点：启动瞬间、下拉通知栏、系统弹框都会走这里。
+        // 这不是「进后台」，所以不在这里拉保活服务（否则一开 App 就冒通知）
+        break;
       case AppLifecycleState.resumed:
-        // App 回到前台 → 停止前台服务（不自动验证登录状态）
-        ForegroundService.stop();
+        // 回到前台也继续挂着保活服务：状态栏一直看得到「保持在线」图标，
+        // 语音引擎也不会被冻（等切到后台再起就来不及了）
+        unawaited(ForegroundService.start());
+        // 顺手救一下通知监听：系统有时还没把它绑回来
+        unawaited(NotifyService.instance.ensureConnected());
         unawaited(_refreshNotifyDot());
         _startNotifyDotTimer();
         // 队列自愈：回到前台主动把照片队列跑起来。
         // 以前只有「启动 App」或「再提交照片」才会启动，
         // 一旦被系统中断过，任务会一直卡在「处理中」等到下一次提交。
         unawaited(PhotoQueueService.instance.start());
-        KeepAliveLogger().add(KeepAliveLogEntry(
-          timestamp: DateTime.now(),
-          event: 'stopped',
-          detail: 'Foreground service stopped (app resumed)',
-          success: true,
-        ));
         break;
       default:
         break;
@@ -1409,32 +1413,31 @@ class _HomePageState extends State<HomePage>
         ],
       ),
       // type: fixed —— 不加这个的话，5 个标签时只有选中的那个显示文字（默认 4 个以上就变 shifting）
-      bottomNavigationBar: ValueListenableBuilder<int>(
-        valueListenable: NotifyService.instance.unread,
-        builder: (ctx, unread, _) => BottomNavigationBar(
-          currentIndex: _currentTab,
-          type: BottomNavigationBarType.fixed,
-          onTap: (index) {
-            _pageController.animateToPage(index,
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeOut);
-          },
-          selectedItemColor: AppConstants.primaryColor,
-          unselectedItemColor: AppConstants.textSecondary,
-          items: [
-            const BottomNavigationBarItem(
-              icon: Icon(Icons.qr_code_scanner),
-              label: '查询',
-            ),
-            const BottomNavigationBarItem(
-              icon: Icon(Icons.add_business),
-              label: '补货',
-            ),
-            const BottomNavigationBarItem(
-              icon: Icon(Icons.receipt_long),
-              label: '记录',
-            ),
-            if (_hasNotify)
+      // 底部铃铛上不显示未读条数（太占地方），只留那颗状态点
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentTab,
+        type: BottomNavigationBarType.fixed,
+        onTap: (index) {
+          _pageController.animateToPage(index,
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOut);
+        },
+        selectedItemColor: AppConstants.primaryColor,
+        unselectedItemColor: AppConstants.textSecondary,
+        items: [
+          const BottomNavigationBarItem(
+            icon: Icon(Icons.qr_code_scanner),
+            label: '查询',
+          ),
+          const BottomNavigationBarItem(
+            icon: Icon(Icons.add_business),
+            label: '补货',
+          ),
+          const BottomNavigationBarItem(
+            icon: Icon(Icons.receipt_long),
+            label: '记录',
+          ),
+          if (_hasNotify)
             BottomNavigationBarItem(
               icon: Stack(
                 clipBehavior: Clip.none,
@@ -1442,40 +1445,15 @@ class _HomePageState extends State<HomePage>
                   const Icon(Icons.notifications),
                   // 通知状态点：绿=权限开了且连着；红=权限没开；半绿半红=掉了线
                   if (NotifyService.supported) _notifyDot(),
-                  if (unread > 0)
-                    Positioned(
-                      right: 0,
-                      top: 0,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 4, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: AppConstants.errorColor,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        constraints:
-                            const BoxConstraints(minWidth: 14),
-                        child: Text(
-                          unread > 99 ? '99+' : '$unread',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                              fontSize: 9,
-                              height: 1.2,
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ),
                 ],
               ),
               label: '通知',
             ),
-            const BottomNavigationBarItem(
-              icon: Icon(Icons.settings),
-              label: '配置',
-            ),
-          ],
-        ),
+          const BottomNavigationBarItem(
+            icon: Icon(Icons.settings),
+            label: '配置',
+          ),
+        ],
       ),
     );
   }

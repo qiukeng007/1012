@@ -29,20 +29,38 @@ class MainActivity : FlutterActivity() {
             NotifyVoice.init(this)
         } catch (_: Throwable) {
         }
-        // 起来 3 秒后自检一次：有权限、但通知监听没连上 → 让系统重新绑一次
-        // （覆盖安装新包后系统经常悄悄解绑，这里能自动接回来）
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            try {
-                if (NotifyListenerService.isEnabled(this) &&
-                    !NotifyListenerService.isConnected()
-                ) {
-                    NotificationListenerService.requestRebind(
-                        ComponentName(this, NotifyListenerService::class.java)
-                    )
+        // 起来后自检：有权限、但通知监听没连上 → 让系统重新绑一次。
+        // 只喊一次不够（重启 App 后系统常常隔十几秒才肯绑），所以没连上就
+        // 每 3 秒再喊一次，最多 8 次。Dart 侧还有一个盯着重连的巡查。
+        val connectCheck = object : Runnable {
+            private var tries = 0
+
+            override fun run() {
+                try {
+                    if (!NotifyListenerService.isEnabled(this@MainActivity) ||
+                        NotifyListenerService.isConnected()
+                    ) {
+                        return
+                    }
+                    // 光喊 requestRebind 这台机不理，要走加码重连
+                    NotifyListenerService.hardReconnect(this@MainActivity)
+                    tries++
+                    if (tries < 8) {
+                        android.os.Handler(android.os.Looper.getMainLooper())
+                            .postDelayed(this, 3000L)
+                    }
+                } catch (_: Throwable) {
                 }
-            } catch (_: Throwable) {
             }
-        }, 3000L)
+        }
+        android.os.Handler(android.os.Looper.getMainLooper())
+            .postDelayed(connectCheck, 1500L)
+        // 这一版起「语音播报」默认是关的。老版本默认开着：用户从没点过那个
+        // 开关，App 一起来就在播报。升级后强制关一次，之后按用户自己的选择来。
+        try {
+            NotifyConfig.migrateSpeakOff(this)
+        } catch (_: Throwable) {
+        }
         // Android 13+: 启动时预请求通知权限，避免前台服务启动时弹窗
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -72,6 +90,8 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "startService" -> {
+                    // 保活服务常驻挂着（前台也挂）：状态栏一直能看到「保持在线」
+                    // 图标，语音引擎 / 通知监听也不会被系统冻掉
                     KeepAliveService.start(this)
                     result.success(true)
                 }
@@ -133,6 +153,17 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "isListenerEnabled" -> {
                         result.success(NotifyListenerService.isEnabled(this))
+                    }
+                    "isListenerConnected" -> {
+                        result.success(NotifyListenerService.isConnected())
+                    }
+                    "forceReconnect" -> {
+                        val info = try {
+                            NotifyListenerService.hardReconnect(this)
+                        } catch (t: Throwable) {
+                            "err:" + t.message
+                        }
+                        result.success(info)
                     }
                     "rebindListener" -> {
                         // 装完新包之后，系统经常把通知监听的绑定解掉，

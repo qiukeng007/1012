@@ -15,7 +15,10 @@ import com.example.pospal_stock_app.R
 class KeepAliveService : Service() {
 
     companion object {
-        const val CHANNEL_ID = "keep_alive_v3"
+        const val CHANNEL_ID = "keep_alive_v5"
+        /** 旧频道：都要删掉，免得系统还照老设置走
+         *  v3 = 会响会弹横幅；v4 = 静音频道（状态栏不显示图标） */
+        val OLD_CHANNEL_IDS = listOf("keep_alive_v3", "keep_alive_v4")
         const val NOTIFICATION_ID = 520
         private var running = false
 
@@ -51,11 +54,8 @@ class KeepAliveService : Service() {
                 if (NotifyListenerService.isEnabled(this@KeepAliveService) &&
                     !NotifyListenerService.isConnected()
                 ) {
-                    android.service.notification.NotificationListenerService.requestRebind(
-                        android.content.ComponentName(
-                            this@KeepAliveService, NotifyListenerService::class.java
-                        )
-                    )
+                    // 后台自己接回来（内部带限流，不会每 15 秒都做一次重活）
+                    NotifyListenerService.hardReconnect(this@KeepAliveService)
                 }
                 // 息屏期间给语音引擎热身：它被系统冻住的话，通知要等亮屏才念得出来
                 if (!NotifyConfig.screenOnNow(this@KeepAliveService)) {
@@ -96,6 +96,11 @@ class KeepAliveService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // 优先级用 DEFAULT（不是 LOW）：
+            //   LOW/MIN 的频道系统不给画状态栏图标，还会被折叠进「静默通知」，
+            //   表现就是「下拉有时看得到有时看不到、顶部一直没图标」。
+            // 但声音和震动都关掉、也不设 sound —— 所以它只是安静地挂在状态栏，
+            // 既不响也不会弹横幅。
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "保持在线",
@@ -103,9 +108,17 @@ class KeepAliveService : Service() {
             ).apply {
                 description = "银豹查询后台保活服务"
                 setShowBadge(false)
+                setSound(null, null)
+                enableVibration(false)
             }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
+            for (old in OLD_CHANNEL_IDS) {
+                try {
+                    manager.deleteNotificationChannel(old)
+                } catch (_: Throwable) {
+                }
+            }
         }
     }
 
@@ -120,9 +133,11 @@ class KeepAliveService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("银豹查询")
             .setContentText("保持在线 · 门店会话保活中")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            // 小图标必须是纯白剪影：用 launcher 图标的话状态栏会是一块白斑
+            .setSmallIcon(R.drawable.ic_stat_pospal)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOnlyAlertOnce(true)
             .setContentIntent(pendingIntent)
             .build()
     }

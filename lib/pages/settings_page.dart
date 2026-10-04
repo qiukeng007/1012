@@ -26,6 +26,8 @@ import 'advanced_settings_page.dart';
 import '../services/advanced_settings_service.dart';
 import 'server_txt_manager_page.dart';
 import 'wechat_login_page.dart';
+import 'notify_card.dart';
+import '../services/notify_service.dart';
 import '../services/store_sync_service.dart';
 import '../models/printer_config.dart';
 import '../services/print_service.dart';
@@ -927,6 +929,14 @@ class _SettingsPageState extends State<SettingsPage> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: _buildRestockConfigCard(),
+          ),
+        ],
+        // 3.5 通知播报（仅安卓）：授权 / 播报 / 应用 / 屏蔽词，默认折起来
+        if (NotifyService.supported) ...[
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: const NotifySettingsCard(),
           ),
         ],
         // 4. 打印机配置（固定3台，不可增减）
