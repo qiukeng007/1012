@@ -19,6 +19,7 @@ import '../services/keepalive_logger.dart';
 import '../services/foreground_service.dart';
 import '../services/usage_log_service.dart';
 import '../services/mode_service.dart';
+import '../widgets/operator_barcode_card.dart';
 import '../widgets/config_form.dart';
 import '../widgets/login_button.dart';
 import 'mode_select_page.dart';
@@ -894,6 +895,11 @@ class _SettingsPageState extends State<SettingsPage> {
     return ListView(
       padding: const EdgeInsets.only(bottom: 24),
       children: [
+        // 操作员条码：长期显示在配置页最上面，方便扫码枪扫屏
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          child: const OperatorBarcodeCard(),
+        ),
         if (_storeMode) ...[
           // 门店模式：全局后台地址（可编辑，逐店工号登录）
           Padding(

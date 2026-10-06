@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'app.dart';
 import 'services/advanced_settings_service.dart';
 import 'services/login_diag.dart';
@@ -7,6 +8,13 @@ import 'services/login_diag.dart';
 void main() async {
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+
+    // 界面锁定竖屏：任何页面（含拍照、裁剪）都不随手机旋转
+    try {
+      await SystemChrome.setPreferredOrientations(
+        const [DeviceOrientation.portraitUp],
+      );
+    } catch (_) {}
 
     // 全局异常留痕：iOS 上这类错误不会弹窗，
     // 写进诊断日志才能在登录页一键复制出来

@@ -28,6 +28,9 @@ class ProductData {
   /// 商品图片URL
   final String? imageUrl;
 
+  /// 创建日期（银豹商品资料「创建日期」列的原文；没启用这一列时为空）
+  final String createDate;
+
   /// 商品列表里「扩展条码」那一列的原文（一品多码可能是多个，用 QueryService 拆） */
   final String extBarcodeRaw;
 
@@ -59,6 +62,7 @@ class ProductData {
     this.uid,
     this.productId,
     this.imageUrl,
+    this.createDate = '',
     this.extBarcodeRaw = '',
     this.multipleMatches,
     this.candidates,
@@ -83,6 +87,7 @@ class ProductData {
     dynamic uid,
     String? productId,
     String? imageUrl,
+    String? createDate,
     String? extBarcodeRaw,
     int? multipleMatches,
     List<ProductData>? candidates,
@@ -101,6 +106,7 @@ class ProductData {
       uid: uid ?? this.uid,
       productId: productId ?? this.productId,
       imageUrl: imageUrl ?? this.imageUrl,
+      createDate: createDate ?? this.createDate,
       extBarcodeRaw: extBarcodeRaw ?? this.extBarcodeRaw,
       multipleMatches: multipleMatches ?? this.multipleMatches,
       candidates: candidates ?? this.candidates,
@@ -144,6 +150,7 @@ class ProductData {
         'buyPrice', 'BuyPrice', 'purchasePrice', 'PurchasePrice',
         'costPrice', 'CostPrice', 'buyingPrice', 'BuyingPrice',
       ]),
+      createDate: _strVal(raw, ['createdDatetime', 'createDate', 'CreateDate']) ?? '',
       uid: raw['uid'] ?? raw['Uid'] ?? raw['id'] ?? raw['Id'],
       rawKeys: raw.keys.join(','),
     );

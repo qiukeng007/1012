@@ -274,6 +274,7 @@ class QueryService {
           productId: raw['productId'],
           imageUrl: raw['imageUrl'] ?? '',
           extBarcodeRaw: (raw['extBarcode'] ?? '').toString(),
+          createDate: (raw['createdDatetime'] ?? '').toString(),
           allColumns: raw['_allColumns'] as String?,
         );
       }).toList();
@@ -555,7 +556,7 @@ class QueryService {
         'wholeSalePrice': _parseNum(colVal(tds, 'wholeSalePrice') ?? ''),
         'memberPrice': _parseNum(colVal(tds, 'memberPrice') ?? ''),
         'supplier': colVal(tds, 'supplierName') ?? '',
-        'createdDatetime': colVal(tds, 'createDate') ?? '',
+        'createdDatetime': _pickCreateDate(colMap, tds, colVal),
         'imageUrl': _extractImageUrl(rowHtml),
         '_allColumns': allColsBuf.toString(),
       };
@@ -564,6 +565,25 @@ class QueryService {
     }
 
     return products;
+  }
+
+  /// 创建日期这一列的 data 名字各门店/各版本不一样（createDate / createdDatetime /
+  /// creationDate / createTime…），所以按关键字宽松挑一个「看起来是日期」的值。
+  static String _pickCreateDate(
+    Map<String, int> colMap,
+    List<String> tds,
+    String? Function(List<String>, String) colVal,
+  ) {
+    final direct = colVal(tds, 'createDate') ?? '';
+    if (direct.trim().isNotEmpty) return direct;
+    final dateRe = RegExp(r'\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}');
+    for (final entry in colMap.entries) {
+      final k = entry.key.toLowerCase();
+      if (!k.contains('create') && !k.contains('creation')) continue;
+      final v = (colVal(tds, entry.key) ?? '').trim();
+      if (v.isNotEmpty && dateRe.hasMatch(v)) return v;
+    }
+    return '';
   }
 
   /// 解析 HTML 表头 `<thead>` 中的 `<th>` 元素，
@@ -3162,8 +3182,10 @@ class QueryService {
   static String mergeOperationNoteLine(
     String? description,
     String newLine,
-    String matchKey,
-  ) {
+    String matchKey, {
+    bool Function(String line)? alsoMatch,
+    bool Function(String line)? dropMatcher,
+  }) {
     final lines = (description ?? '')
         .split('\n')
         .map((l) => l.trimRight())
@@ -3176,11 +3198,24 @@ class QueryService {
       '更新图片': ['更新照片'],
     };
     final keys = <String>[matchKey, ...?legacyAliases[matchKey]];
-    final idx = lines.indexWhere((l) => keys.any(l.contains));
+    var idx = lines.indexWhere((l) => keys.any(l.contains));
+    // 带门店标签的新写法（例如「更新C2库存…」）跟老的无标签写法
+    // （「更新库存24（原库存74）」）互不包含，老行会永远留着变成假信息 ——
+    // 调用方用 alsoMatch 把这类老行一并顶掉。
+    if (idx < 0 && alsoMatch != null) {
+      idx = lines.indexWhere(alsoMatch);
+    }
     if (idx >= 0) {
+      // 只替换命中的这一行。注意：绝不删别的行 ——
+      // 每家门店的库存记录要能同时存在（曾经因为「同类只留一条」把别家店的记录删掉过）。
       lines[idx] = newLine;
     } else {
       lines.add(newLine);
+    }
+    // dropMatcher：只用来清掉「明确不再需要」的写法（目前只用于清掉
+    // 曾经误写成「更新全部库存…」的那一行），匹配面很窄，不会误删别家店的记录。
+    if (dropMatcher != null) {
+      lines.removeWhere(dropMatcher);
     }
     return lines.where((l) => l.trim().isNotEmpty).join('\n');
   }
@@ -3195,6 +3230,8 @@ class QueryService {
     String actionLabel, {
     String? productUid,
     String? matchLabel,
+    bool Function(String line)? alsoMatch,
+    bool Function(String line)? dropMatcher,
   }) async {
     final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
     final code = barcode.trim();
@@ -3251,20 +3288,29 @@ class QueryService {
       }
 
       final contentView = searchData['contentView'] as String? ?? '';
-      // 优先按商品 uid 精准定位（同一条码多个商品时更新用户选中的那一个）
+      // 定位商品：给了 uid 就只认 uid。
+      // 以前 uid 没命中会兜底取搜索结果的「第一行」—— 同一条码搜出多个商品、
+      // 或那家门店的条码不一样时，记录就会写到别的商品上，甚至把那个商品的
+      // 商品描述整个覆盖掉（真实事故：门店描述里原有的「编辑库存」被写没了）。
+      // 现在宁可这一步失败（队列日志里能看到原因），也不写错商品。
       String? productId;
-      if (productUid != null && productUid.isNotEmpty) {
+      final wantUid = (productUid ?? '').trim();
+      if (wantUid.isNotEmpty) {
         final uidRowRegex = RegExp(
             r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>');
         for (final m in uidRowRegex.allMatches(contentView)) {
-          if (m.group(2) == productUid) {
+          if (m.group(2) == wantUid) {
             productId = m.group(1);
             break;
           }
         }
+        if (productId == null) {
+          return '未找到该商品（uid $wantUid 在该门店没匹配到，已跳过，未改动描述）';
+        }
+      } else {
+        productId =
+            RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
       }
-      productId ??=
-          RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
       if (productId == null) return '未找到该商品';
 
       // 3. FindProduct 获取完整数据
@@ -3304,6 +3350,8 @@ class QueryService {
         product[fieldName] as String?,
         newLine,
         matchLabel ?? actionLabel,
+        alsoMatch: alsoMatch,
+        dropMatcher: dropMatcher,
       );
 
       // 5. SaveProduct 保存

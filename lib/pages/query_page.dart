@@ -142,6 +142,13 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   // 查询页手动更换的供货商（条码 -> 新供货商名，仅本次展示覆盖）
   final Map<String, String> _supplierOverrides = {};
   final Map<String, String> _productNameOverrides = {};
+  /// 商品详情补充信息（描述 / 创建日期）：商品列表接口没有这两项，
+  /// 查到商品后按条码单独拉一次 FindProduct 补上，拿到就刷新显示
+  final Map<String, ({String description, String createDate})> _detailInfo = {};
+  final Set<String> _detailLoading = {};
+  /// 详情拉过一次（含失败）就不再反复拉，免得每次重建都发请求；
+  /// 重新搜索时清空，允许再试一次
+  final Set<String> _detailTried = {};
   // 查询页手动修改的售价（商品身份键 -> 新售价，仅本次展示覆盖）
   final Map<String, double> _sellPriceOverrides = {};
   final Map<String, double> _buyPriceOverrides = {};
@@ -500,6 +507,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     _barcodeFocus.unfocus(); // 收起键盘
     _cancelTransfer(); // 新搜索清空调货状态
     _productImageOverrides.clear(); // 新搜索清空图片缓存，展示服务器最新图片
+    _detailTried.clear(); // 新搜索允许重新补拉商品详情（描述/创建日期）
+    _detailInfo.clear(); // 描述/创建日期也一起清：银豹那边改了要能立刻看到最新的
     _localPhotoBytes.clear(); // 本地队列照片也一起清，避免串到别的商品
 
     setState(() {
@@ -1019,6 +1028,175 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     );
   }
 
+  /// 查到商品后补拉一次商品详情（描述 + 创建日期）。
+  /// 失败就当没有，不弹任何错误 —— 这两项只是补充信息。
+  void _ensureProductDetail(
+      ProductData data, String barcode, String? storeName, String key) {
+    if (_detailInfo.containsKey(key) ||
+        _detailLoading.contains(key) ||
+        _detailTried.contains(key)) {
+      return;
+    }
+    _detailTried.add(key);
+    final store = _findConfig(storeName ?? '') ??
+        widget.configs.where((c) => c.enabled).firstOrNull;
+    if (store == null) return;
+    _detailLoading.add(key);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        final code = data.barcode.trim().isNotEmpty
+            ? data.barcode.trim()
+            : barcode.trim();
+        final (err, product) = await widget.queryService.fetchProductForSync(
+          store,
+          code,
+          productUid: data.uid?.toString(),
+          productId: data.productId,
+        );
+        if (err != null || product == null) return;
+        String pick(List<String> keys) {
+          for (final k in keys) {
+            final v = product[k];
+            if (v != null && v.toString().trim().isNotEmpty) {
+              return v.toString().trim();
+            }
+          }
+          return '';
+        }
+
+        final info = (
+          description: pick(['description', 'remarks', 'productDescription']),
+          createDate: pick([
+            'createdDatetime',
+            'createDate',
+            'createdDate',
+            'createTime',
+            'createdAt',
+            'creationDate',
+          ]),
+        );
+        if (!mounted) return;
+        setState(() => _detailInfo[key] = info);
+      } catch (_) {
+      } finally {
+        _detailLoading.remove(key);
+      }
+    });
+  }
+
+  /// 点商品描述：弹出「各门店商品描述」，逐个门店读一遍（列表接口里没有描述，
+  /// 只能按门店分别拉商品详情）。只读，不改任何数据。
+  Future<void> _openStoreDescriptions(
+      ProductData data, String barcode) async {
+    final r = _lastResult;
+    if (r == null) return;
+    final code =
+        data.barcode.trim().isNotEmpty ? data.barcode.trim() : barcode.trim();
+    // 顺序跟首页门店卡片一致：勾选的门店从左到右 → 左边那家排上面
+    final entries = <
+        ({String storeKey, String storeName, StoreConfig cfg, String? productId})>[];
+    const keyOrder = <String, int>{'store1': 0, 'store2': 1, 'store3': 2};
+    final keys = r.stores.keys.toList()
+      ..sort((a, b) => (keyOrder[a] ?? 99).compareTo(keyOrder[b] ?? 99));
+    for (final k in keys) {
+      final st = r.stores[k];
+      final pd = st?.data;
+      if (st == null || pd == null) continue; // 这次没查到数据的门店跳过
+      final cfg = _findConfig(st.storeName);
+      if (cfg == null) continue;
+      entries.add((
+        storeKey: k,
+        storeName: st.storeName,
+        cfg: cfg,
+        productId: pd.productId,
+      ));
+    }
+    if (entries.isEmpty) {
+      _showBanner('没有可读取描述的门店', isError: true);
+      return;
+    }
+    final key = _photoKey(data, barcode);
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => _StoreDescriptionsDialog(
+        queryService: widget.queryService,
+        entries: entries,
+        barcode: code,
+        productUid: data.uid?.toString(),
+        productName: (_productNameOverrides[_productKey(data)] ?? data.name).trim(),
+        onReload: () {
+          // 顺便让卡片里那条描述也重新读一次
+          setState(() {
+            _detailInfo.remove(key);
+            _detailTried.remove(key);
+          });
+        },
+      ),
+    );
+  }
+
+  /// 在「固定宽 × 固定高」的小框里，挑一个尽量大的字号把整段文字放下。
+  /// 关键是只缩字号、不缩整块：这样文字始终铺满右边那块宽度，右边不会留白。
+  double _fitFontSize(String text, TextStyle style, double w, double h) {
+    final base = style.fontSize ?? 11.0;
+    if (w <= 0 || h <= 0) return base;
+    var size = base;
+    while (size > 5.0) {
+      final tp = TextPainter(
+        text: TextSpan(text: text, style: style.copyWith(fontSize: size)),
+        textDirection: TextDirection.ltr,
+        maxLines: 60,
+      )..layout(maxWidth: w);
+      if (tp.height <= h) return size;
+      size -= 0.25;
+    }
+    return 5.0;
+  }
+
+  /// 门店短标签：写进商品描述里，用来看出是哪家店改的。
+  /// 取法（从短到长）：
+  ///   1) 名字里 " - " 前面那段：`C2 - CHINA CASH AND CARRY 2店` → `C2`
+  ///   2) 名字里的「数字+店」：`CHINA CASH AND CARRY 2店` → `2店`
+  ///   3) 都没有就用名字本身（太长截断 6 字）
+  String _storeShortLabel(String name) {
+    final raw = name.trim();
+    if (raw.isEmpty) return '';
+    final dash = RegExp(r'\s*[-–—]\s*').firstMatch(raw);
+    if (dash != null && dash.start > 0) {
+      final head = raw.substring(0, dash.start).trim();
+      if (head.isNotEmpty && head.length <= 8) return head;
+    }
+    final numStore = RegExp(r'(\d+)\s*店').firstMatch(raw);
+    if (numStore != null) return '${numStore.group(1)}店';
+    var label = raw;
+    if (label.length > 6) label = label.substring(0, 6);
+    return label;
+  }
+
+  /// 这家门店写进描述时用哪个标签。
+  /// 如果短标签跟别的门店撞了（比如名字都带同样的前后缀），就退化成完整名字，
+  /// 保证不同门店的标签一定不一样 —— 否则改一家会把另一家的记录顶掉。
+  String _storeLabelForDesc(StoreConfig cfg) {
+    final short = _storeShortLabel(cfg.name);
+    if (short.isEmpty) return _storeShortLabel(cfg.storeId);
+    final dup = widget.configs.any((c) =>
+        c.storeKey != cfg.storeKey && _storeShortLabel(c.name) == short);
+    if (!dup) return short;
+    final full = cfg.name.trim();
+    if (full.isNotEmpty) return full;
+    return short;
+  }
+
+  /// 银豹「创建日期」原文可能是 "2016-09-13" 或 "2016-09-13 15:04:05"，
+  /// 统一取成 yyyy-MM-dd；取不到日期就原样返回（最多 10 个字）
+  String _fmtProductDate(String raw) {
+    final s = raw.trim();
+    final m = RegExp(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})').firstMatch(s);
+    if (m == null) return s.length > 10 ? s.substring(0, 10) : s;
+    return '${m.group(1)}-${m.group(2)!.padLeft(2, '0')}-${m.group(3)!.padLeft(2, '0')}';
+  }
+
   // ==================== 结果区 ====================
 
   Widget _buildResultSection(MultiStoreResult r) {
@@ -1043,6 +1221,18 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           break;
         }
       }
+    }
+
+    // 商品描述 / 创建日期：商品列表接口里没有，查到商品后补拉一次详情
+    final detailKey = firstData == null ? '' : _photoKey(firstData, r.barcode);
+    final detailInfo = detailKey.isEmpty ? null : _detailInfo[detailKey];
+    final createDateText = firstData == null
+        ? ''
+        : (firstData.createDate.trim().isNotEmpty
+            ? firstData.createDate.trim()
+            : (detailInfo?.createDate ?? ''));
+    if (firstData != null && detailKey.isNotEmpty) {
+      _ensureProductDetail(firstData, r.barcode, firstStoreName, detailKey);
     }
 
     // 按 store1, store2, store3 固定顺序排列门店库存
@@ -1070,8 +1260,17 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
               '门店库存',
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
             ),
+            // 商品创建日期：门店库存（2016-09-13）
+            if (createDateText.isNotEmpty) ...[
+              const SizedBox(width: 2),
+              Text(
+                '（${_fmtProductDate(createDateText)}）',
+                style: const TextStyle(
+                    fontSize: 12, color: AppConstants.textSecondary),
+              ),
+            ],
+            const Spacer(),
             if (_transferQty != 0) ...[
-              const Spacer(),
               _hintDot(Colors.green),
               const SizedBox(width: 2),
               const Text('增加', style: TextStyle(fontSize: 10, color: AppConstants.textSecondary)),
@@ -1079,7 +1278,29 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
               _hintDot(Colors.red),
               const SizedBox(width: 2),
               const Text('调出', style: TextStyle(fontSize: 10, color: AppConstants.textSecondary)),
+              const SizedBox(width: 10),
             ],
+            // 变动明细：从商品信息卡的单位行挪到这里
+            if (firstData != null)
+              SizedBox(
+                width: 70,
+                child: OutlinedButton(
+                  onPressed: () => _openStockHistory(firstData, r.barcode),
+                  child: const Text('变动明细', style: TextStyle(fontSize: 10)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppConstants.primaryColor,
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(0, 26),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    // 方角造型
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                    side: BorderSide(
+                        color: AppConstants.primaryColor.withValues(alpha: 0.5)),
+                  ),
+                ),
+              ),
           ],
         ),
         const SizedBox(height: 6),
@@ -1244,6 +1465,14 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   Widget _buildProductInfo(ProductData data, String barcode,
       String? sourceStoreName) {
     final barcodePng = _barcodePng(data.barcode.isNotEmpty ? data.barcode : barcode);
+    // 商品描述（详情接口补拉来的；列表接口没有）
+    final desc =
+        (_detailInfo[_photoKey(data, barcode)]?.description ?? '').trim();
+    // 右边描述框的高度 = 左边三行（一维码 30 / 供货商 22 / 单位 22）之和。
+    // 写死高度，描述有几条记录都不会把框撑高，永远跟「单位」行齐平。
+    final double descBoxH = (barcodePng != null ? 30.0 : 0.0) +
+        (data.supplier.isNotEmpty ? 22.0 : 0.0) +
+        22.0;
     return Card(
       elevation: 1,
       shape: RoundedRectangleBorder(
@@ -1295,26 +1524,32 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                 _buildProductImageBox(data, barcode, sourceStoreName),
               ],
             ),
-            // 一维码（条形码图片）位于图片框下方左侧
+            // 图片框下面这块：左边「一维码 + 供货商 + 单位」，右边的空位放商品描述
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+            // 一维码（条形码图片）位于图片框下方左侧。
+            // 高度写死 24：左边三行高度固定了，右边描述框才能跟「单位」行齐平
             if (barcodePng != null)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          alignment: Alignment.centerLeft,
-                          child: Image.memory(
-                            barcodePng,
-                            gaplessPlayback: true,
-                          ),
-                        ),
+                child: SizedBox(
+                  height: 24,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Image.memory(
+                        barcodePng,
+                        gaplessPlayback: true,
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ),
             if (data.supplier.isNotEmpty)
@@ -1335,23 +1570,37 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                           style: TextStyle(
                               fontSize: 13, color: AppConstants.textSecondary)),
                       Expanded(
-                        child: Text(
-                          _supplierOverrides[barcode] ?? data.supplier,
-                          style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFF28a745)),
-                          overflow: TextOverflow.ellipsis,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Flexible(
+                              // 名称过长时自动缩小字体保持单行完整显示（与商品名称一致）
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  _supplierOverrides[barcode] ?? data.supplier,
+                                  style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF28a745)),
+                                ),
+                              ),
+                            ),
+                            // 铅笔紧跟在供货商名字后面（以前顶在最右边，占掉了右侧空间）
+                            if (AdvancedSettingsService.instance.allowSupplier) ...[
+                              const SizedBox(width: 4),
+                              const Icon(Icons.edit,
+                                  size: 13, color: Color(0xFF28a745)),
+                            ],
+                          ],
                         ),
                       ),
-                      if (AdvancedSettingsService.instance.allowSupplier)
-                        const Icon(Icons.edit,
-                            size: 13, color: Color(0xFF28a745)),
                     ],
                   ),
                 ),
               ),
-            // 单位行：单位信息 + 右侧变动明细按钮（右缘与图片框右缘对齐）
+            // 单位行（变动明细按钮已挪到下面的「门店库存」标题行）
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Row(
@@ -1386,29 +1635,51 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                       ),
                     ),
                   ),
-                  const SizedBox(width: 6),
+                ],
+              ),
+            ),
+                    ],
+                  ),
+                ),
+                // 商品描述：就放在「一维码/供货商/单位」右边那块空位里
+                // （最多 3 行，超出省略；点一下看全文，可复制）
+                if (desc.isNotEmpty) ...[
+                  const SizedBox(width: 10),
+                  // 高度固定，跟左边三行（一维码/供货商/单位）齐平就好；
+                  // 整段描述按比例缩小塞进去，有几条记录都能看到
                   SizedBox(
-                    width: 70,
-                    child: OutlinedButton(
-                      onPressed: () => _openStockHistory(data, barcode),
-                      child: const Text('变动明细', style: TextStyle(fontSize: 10)),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppConstants.primaryColor,
-                        padding: EdgeInsets.zero,
-                        minimumSize: const Size(0, 26),
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        // 方角造型，与同步照片按钮一致
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(2),
+                    width: 150,
+                    height: descBoxH,
+                    child: InkWell(
+                      onTap: () => _openStoreDescriptions(data, barcode),
+                      borderRadius: BorderRadius.circular(6),
+                      child: Container(
+                        padding: const EdgeInsets.all(5),
+                        decoration: BoxDecoration(
+                          color: AppConstants.bgColor,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: AppConstants.dividerColor),
                         ),
-                        side: BorderSide(
-                            color: AppConstants.primaryColor
-                                .withValues(alpha: 0.5)),
+                        // 文字铺满这块宽度，装不下就自动缩小字号（只缩字、不缩整块，
+                        // 所以右边不会留白，也不会因为整块缩放而提前折行）
+                        child: LayoutBuilder(
+                          builder: (c, cons) {
+                            const base = TextStyle(fontSize: 10.5, height: 1.2);
+                            final fs = _fitFontSize(
+                                desc, base, cons.maxWidth, cons.maxHeight);
+                            return ClipRect(
+                              child: Text(
+                                desc,
+                                style: base.copyWith(fontSize: fs),
+                              ),
+                            );
+                          },
+                        ),
                       ),
                     ),
                   ),
                 ],
-              ),
+              ],
             ),
             // 进价 + 售价同行
             if (data.buyPrice != null || data.sellPrice != null)
@@ -1678,9 +1949,10 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     // 预览加载原图（去掉 _200x200 缩略图后缀），走缓存优先组件
     final full = url.startsWith('http') ? url : 'https://img.pospal.cn$url';
     final original = full.replaceAll('_200x200', '');
-    // 「更换照片」按钮刚打开时露一下，3 秒后自动淡出，避免挡住照片
+    // 「更换照片」按钮一开始就是缩小状态（只留小相机图标），不挡照片；
+    // 想换图点一下小图标展开，3 秒后自动收回去
     Timer? hideTimer;
-    var showChangeBtn = true;
+    var showChangeBtn = false;
     final dialog = showDialog(
       context: context,
       // 背景压得很透：放大看图时，下面的商品名称/条码/价格仍然看得清
@@ -1698,8 +1970,6 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                 setDialogState(() => showChangeBtn = false);
               });
             }
-
-            if (hideTimer == null) startHideCountdown();
 
             return GestureDetector(
               behavior: HitTestBehavior.opaque,
@@ -1729,7 +1999,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                         ),
                       ),
                     ),
-                    // 放大界面内选择是否更换照片（3 秒后淡出，只留一个小图标）
+                    // 放大界面内选择是否更换照片（默认收起，点小图标才展开）
                     Positioned(
                       right: 16,
                       bottom: 28,
@@ -1754,7 +2024,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                         ),
                       ),
                     ),
-                    // 收起后留一个小相机图标，点一下还能把按钮叫回来
+                    // 默认显示的小相机图标，点一下展开「更换照片」
                     if (!showChangeBtn)
                       Positioned(
                         right: 16,
@@ -2761,8 +3031,25 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     final product = storeData.data!;
     final barcode =
         product.barcode.isNotEmpty ? product.barcode : _lastResult!.barcode;
+
+    // 记录要同步到哪些门店 = 这次查到数据的所有「已勾选门店」。
+    // 注意：库存只改用户点的那一家；这里只是为了把「更新库存」这条记录
+    // 也写到其它门店的描述里，免得只有一家店看得到记录。
+    const keyOrder = <String, int>{'store1': 0, 'store2': 1, 'store3': 2};
+    final keys = _lastResult!.stores.keys.toList()
+      ..sort((a, b) => (keyOrder[a] ?? 99).compareTo(keyOrder[b] ?? 99));
+    final targets = <({StoreConfig cfg, StoreStockResult st})>[];
+    for (final k in keys) {
+      final st = _lastResult!.stores[k];
+      if (st == null || st.data == null) continue;
+      final c = _findConfig(st.storeName);
+      if (c == null) continue;
+      targets.add((cfg: c, st: st));
+    }
+
     setState(() => _editingStock = true);
     try {
+      // 1) 库存只改用户操作的那一家门店（别的门店库存一律不动）
       final error = await widget.queryService.updateProductStock(
         config,
         barcode,
@@ -2772,22 +3059,47 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       if (error != null) {
         _showBanner(error, isError: true);
       } else {
-        final descErr = await widget.queryService.updateProductOperationNote(
-          config,
-          barcode,
-          opName,
-          '更新库存${_fmtNum(qty)}（原库存${_fmtNum(product.stock)}）',
-          productUid: product.uid?.toString(),
-          matchLabel: '更新库存',
-        );
-        _showBanner(descErr == null
-            ? '库存已更新'
-            : '库存已更新，描述未写入：$descErr',
-            isError: descErr != null);
+        // 2) 记录写成带门店标签的一行（例如「更新C2库存24（原库存74）」），
+        //    并写到所有已勾选门店的描述里：
+        //    总部模式走官方同步、门店模式各店各写一条，都不会漏门店。
+        final storeLabel = _storeLabelForDesc(config);
+        final line =
+            '更新${storeLabel}库存${_fmtNum(qty)}（原库存${_fmtNum(product.stock)}）';
+        final matchKey = '更新${storeLabel}库存';
+        final noteSkipped = <String>[];
+        for (final t in targets) {
+          final descErr = await widget.queryService.updateProductOperationNote(
+            t.cfg,
+            barcode,
+            opName,
+            line,
+            productUid: t.st.data!.uid?.toString(),
+            matchLabel: matchKey,
+            // 老版本写的是没门店标签的「更新库存…」；中间那版误写过
+            // 「更新全部库存…」，两种都顶掉
+            alsoMatch: (l) =>
+                l.contains('（原库存') &&
+                (l.contains('更新库存') || l.contains('更新全部库存')),
+            dropMatcher: (l) => l.contains('更新全部库存'),
+          );
+          if (descErr != null) noteSkipped.add('${t.st.storeName}：$descErr');
+        }
         _cancelEditStock();
         final code = _barcodeController.text.trim();
         if (code.isNotEmpty) {
           _query(code);
+        }
+        if (noteSkipped.isEmpty) {
+          _showBanner('库存已更新（记录已同步 ${targets.length} 家门店）✓');
+        } else {
+          final detail = '操作：编辑库存（记录同步到已勾选门店）\n'
+              '条码：$barcode\n'
+              '只改了这一家门店的库存：${storeData.storeName} → ${_fmtNum(qty)}\n'
+              '操作员：$opName\n'
+              '时间：${DateTime.now()}\n\n'
+              '记录已写入：${targets.length - noteSkipped.length} 家\n'
+              '记录没写入的门店：\n${noteSkipped.join('\n')}';
+          _showCopyableError('库存已更新，但部分门店描述没写入', detail);
         }
       }
     } catch (e) {
@@ -4536,6 +4848,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         line,
         productUid: productUid,
         matchLabel: matchKey,
+        // 老的无门店标签的库存行，以及中间那版误写的「更新全部库存…」，一并顶掉
+        alsoMatch: (l) =>
+            l.contains('（原库存') &&
+            (l.contains('更新库存') || l.contains('更新全部库存')),
+        dropMatcher: (l) => l.contains('更新全部库存'),
       );
     } catch (_) {
       // 记录写入失败不阻断调货
@@ -4660,16 +4977,16 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             _writeStockNote(
               sourceConfig,
               barcode,
-              '更新库存${_fmtNum(newSrcStock)}（原库存${_fmtNum(srcStock)}）',
-              '更新库存',
+              '更新${_storeLabelForDesc(sourceConfig)}库存${_fmtNum(newSrcStock)}（原库存${_fmtNum(srcStock)}）',
+              '更新${_storeLabelForDesc(sourceConfig)}库存',
               opName,
               srcData.uid?.toString(),
             ),
             _writeStockNote(
               targetConfig,
               barcode,
-              '更新库存${_fmtNum(newTgtStock)}（原库存${_fmtNum(tgtStock)}）',
-              '更新库存',
+              '更新${_storeLabelForDesc(targetConfig)}库存${_fmtNum(newTgtStock)}（原库存${_fmtNum(tgtStock)}）',
+              '更新${_storeLabelForDesc(targetConfig)}库存',
               opName,
               tgtData.uid?.toString(),
             ),
@@ -5241,5 +5558,159 @@ class _CandidatePickerDialog extends StatelessWidget {
   static String _fmtStockNum(double v) {
     if (v == v.roundToDouble()) return v.toInt().toString();
     return v.toStringAsFixed(2);
+  }
+}
+
+
+/// 「各门店商品描述」弹窗：逐个已勾选门店读一遍该商品的描述，方便对比。
+/// 只读，不改数据；读取失败会把原因写在对应门店下面。
+class _StoreDescriptionsDialog extends StatefulWidget {
+  const _StoreDescriptionsDialog({
+    required this.queryService,
+    required this.entries,
+    required this.barcode,
+    required this.productUid,
+    required this.productName,
+    this.onReload,
+  });
+
+  final QueryService queryService;
+  final List<
+      ({String storeKey, String storeName, StoreConfig cfg, String? productId})>
+      entries;
+  final String barcode;
+  final String? productUid;
+  final String productName;
+  final VoidCallback? onReload;
+
+  @override
+  State<_StoreDescriptionsDialog> createState() =>
+      _StoreDescriptionsDialogState();
+}
+
+class _StoreDescriptionsDialogState extends State<_StoreDescriptionsDialog> {
+  late Future<List<({String storeName, String desc, String? error})>> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _load();
+  }
+
+  Future<List<({String storeName, String desc, String? error})>> _load() async {
+    final tasks = widget.entries.map((e) async {
+      try {
+        final (err, product) = await widget.queryService.fetchProductForSync(
+          e.cfg,
+          widget.barcode,
+          productUid: widget.productUid,
+          productId: e.productId,
+        );
+        if (err != null || product == null) {
+          return (
+            storeName: e.storeName,
+            desc: '',
+            error: err ?? '商品数据为空',
+          );
+        }
+        final desc =
+            (product['description'] ?? product['remarks'] ?? '').toString().trim();
+        return (
+          storeName: e.storeName,
+          desc: desc.isEmpty ? '（空）' : desc,
+          error: null,
+        );
+      } catch (ex) {
+        return (storeName: e.storeName, desc: '', error: '读取失败：$ex');
+      }
+    }).toList();
+    return Future.wait(tasks);
+  }
+
+  String _copyText(List<({String storeName, String desc, String? error})> rows) {
+    final b = StringBuffer();
+    if (widget.productName.isNotEmpty) b.writeln('商品：${widget.productName}');
+    b.writeln('条码：${widget.barcode}');
+    for (final r in rows) {
+      b.writeln('');
+      b.writeln('【${r.storeName}】');
+      b.writeln(r.error != null ? '（读取失败：${r.error}）' : r.desc);
+    }
+    return b.toString().trimRight();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('各门店商品描述', style: TextStyle(fontSize: 16)),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: FutureBuilder<List<({String storeName, String desc, String? error})>>(
+          future: _future,
+          builder: (ctx, snap) {
+            if (snap.connectionState != ConnectionState.done) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 28),
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            final rows = snap.data ?? const [];
+            return SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (widget.productName.isNotEmpty)
+                    Text('商品：${widget.productName}',
+                        style: const TextStyle(
+                            fontSize: 12, color: AppConstants.textSecondary)),
+                  Text('条码：${widget.barcode}',
+                      style: const TextStyle(
+                          fontSize: 12, color: AppConstants.textSecondary)),
+                  const SizedBox(height: 8),
+                  for (final r in rows) ...[
+                    Text('【${r.storeName}】',
+                        style: const TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 2),
+                    SelectableText(
+                      r.error != null ? '读取失败：${r.error}' : r.desc,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: r.error != null
+                            ? const Color(0xFFD32F2F)
+                            : AppConstants.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () async {
+            final rows = await _future;
+            await Clipboard.setData(ClipboardData(text: _copyText(rows)));
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('已复制各门店描述'),
+                duration: Duration(seconds: 1)));
+          },
+          child: const Text('复制全部'),
+        ),
+        TextButton(
+          onPressed: () {
+            widget.onReload?.call();
+            setState(() => _future = _load());
+          },
+          child: const Text('重新读取'),
+        ),
+        TextButton(
+            onPressed: () => Navigator.pop(context), child: const Text('关闭')),
+      ],
+    );
   }
 }

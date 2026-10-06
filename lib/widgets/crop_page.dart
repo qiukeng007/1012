@@ -21,6 +21,9 @@ class _CropPageState extends State<CropPage> {
   Rect _imgRect = Rect.zero;
   bool _loaded = false;
   String? _failReason;
+  /// 旋转后显示的是新写出来的临时文件（裁剪计算仍按 _src，保持一致）
+  String? _displayPath;
+  bool _rotating = false;
 
   @override
   void initState() {
@@ -80,6 +83,68 @@ class _CropPageState extends State<CropPage> {
       ),
     );
     if (back == true && mounted) Navigator.pop(context);
+  }
+
+  /// 旋转 90°：[dir] = 1 右转、-1 左转。
+  /// 直接把像素转过去（而不是只转显示），这样裁剪框的坐标换算完全不用改。
+  Future<void> _rotate(int dir) async {
+    if (_busy || _rotating || _src == null) return;
+    setState(() => _rotating = true);
+    try {
+      final rotated = img.copyRotate(_src!, dir * 90);
+      final jpg = img.encodeJpg(rotated, quality: 92);
+      final out = File(
+          '${Directory.systemTemp.path}/rot_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      await out.writeAsBytes(jpg);
+      final old = _displayPath;
+      if (!mounted) return;
+      setState(() {
+        _src = rotated;
+        _displayPath = out.path;
+        // 旋转后尺寸变了：缩放复位、裁剪框重新居中
+        _scale = 1.0;
+        _baseScale = 1.0;
+        _cropX = -1;
+        _cropY = -1;
+      });
+      // 清掉上一张旋转出来的临时文件
+      if (old != null) {
+        try {
+          File(old).delete();
+        } catch (_) {}
+      }
+    } catch (e) {
+      if (mounted) await _showRotateFailed(e);
+    } finally {
+      if (mounted) setState(() => _rotating = false);
+    }
+  }
+
+  /// 旋转出错：原因可一键复制（旋转失败不改动照片）
+  Future<void> _showRotateFailed(Object e) async {
+    final detail = '旋转这张照片时出错（照片没有改动）。\n\n'
+        '照片：${widget.imagePath}\n'
+        '错误：$e';
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('旋转失败', style: TextStyle(fontSize: 16)),
+        content: SingleChildScrollView(
+          child: SelectableText(detail, style: const TextStyle(fontSize: 13)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: detail));
+              if (ctx.mounted) Navigator.pop(ctx);
+            },
+            child: const Text('复制'),
+          ),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('知道了')),
+        ],
+      ),
+    );
   }
 
   double get _topPad => MediaQuery.of(context).padding.top + kToolbarHeight;
@@ -219,6 +284,22 @@ class _CropPageState extends State<CropPage> {
         backgroundColor: Colors.black, foregroundColor: Colors.white,
         title: const Text('裁剪 (拖动选框)'),
         actions: [
+          IconButton(
+            tooltip: '向左转 90°',
+            onPressed: (_busy || _rotating || !_loaded || _src == null)
+                ? null
+                : () => _rotate(-1),
+            icon: const Icon(Icons.rotate_left),
+            color: Colors.white,
+          ),
+          IconButton(
+            tooltip: '向右转 90°',
+            onPressed: (_busy || _rotating || !_loaded || _src == null)
+                ? null
+                : () => _rotate(1),
+            icon: const Icon(Icons.rotate_right),
+            color: Colors.white,
+          ),
           TextButton(
             onPressed: (_busy || !_loaded) ? null : _done,
             child: Text(_busy ? '…' : '确认 ✓',
@@ -267,14 +348,19 @@ class _CropPageState extends State<CropPage> {
                     Transform.scale(
                       scale: _scale,
                       alignment: Alignment.center,
-                      child: Image.file(File(widget.imagePath), fit: BoxFit.contain,
-                          width: c.maxWidth, height: c.maxHeight),
+                      child: Image.file(File(_displayPath ?? widget.imagePath),
+                          fit: BoxFit.contain,
+                          width: c.maxWidth,
+                          height: c.maxHeight),
                     ),
                     CustomPaint(
                       size: Size(c.maxWidth, c.maxHeight),
                       painter: _Mask(Rect.fromLTWH(_cropX, _cropY, _cropW, _cropW)),
                     ),
-                    if (_busy) const Center(child: CircularProgressIndicator(color: Colors.white)),
+                    if (_busy || _rotating)
+                      const Center(
+                          child:
+                              CircularProgressIndicator(color: Colors.white)),
                   ],
                 ),
               );
