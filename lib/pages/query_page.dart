@@ -4833,7 +4833,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   }
 
   /// 给单个门店写一条库存类操作记录（[line] 是整行文字，[matchKey] 用于覆盖同类行）
-  Future<void> _writeStockNote(
+  /// 写一条库存记录到某家门店的商品描述。返回 null = 成功，否则返回失败原因
+  /// （以前失败是静默吞掉的，结果出现「只写进一条、两边描述不一致」都查不出来）。
+  Future<String?> _writeStockNote(
     StoreConfig store,
     String barcode,
     String line,
@@ -4842,7 +4844,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     String? productUid,
   ) async {
     try {
-      await widget.queryService.updateProductOperationNote(
+      return await widget.queryService.updateProductOperationNote(
         store,
         barcode,
         opName,
@@ -4854,8 +4856,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         dropMatcher: (l) =>
             l.contains('更新全部库存') || QueryService.isUnlabeledStockNote(l),
       );
-    } catch (_) {
-      // 记录写入失败不阻断调货
+    } catch (e) {
+      return '$e';
     }
   }
 
@@ -4972,25 +4974,44 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             barcode: barcode,
             detail: '调出 $qty 件',
           );
-          // 门店模式调货＝直接改两店库存，各写自己的「更新库存」记录
+          // 门店模式调货＝直接改两店库存。
+          // 两条记录（调出店一行、调入店一行）要写到「两家门店」的商品描述里，
+          // 这样两个门店看到的描述内容一致；以前各写各的，两边就对不上了。
+          final srcLabel = _storeLabelForDesc(sourceConfig);
+          final tgtLabel = _storeLabelForDesc(targetConfig);
+          final srcLine =
+              '更新${srcLabel}库存${_fmtNum(newSrcStock)}（原库存${_fmtNum(srcStock)}）';
+          final tgtLine =
+              '更新${tgtLabel}库存${_fmtNum(newTgtStock)}（原库存${_fmtNum(tgtStock)}）';
+          // 同一家门店必须「一条写完再写另一条」：否则两次读-改-写并发，
+          // 后写的那次可能基于旧描述，把刚写进去的那行覆盖掉。
+          final noteErrors = <String>[];
+          Future<void> writeBothNotes(
+              StoreConfig cfg, String? uid, String storeName) async {
+            final e1 = await _writeStockNote(
+                cfg, barcode, srcLine, '更新${srcLabel}库存', opName, uid);
+            if (e1 != null) noteErrors.add('$storeName：$e1');
+            final e2 = await _writeStockNote(
+                cfg, barcode, tgtLine, '更新${tgtLabel}库存', opName, uid);
+            if (e2 != null) noteErrors.add('$storeName：$e2');
+          }
+
           await Future.wait([
-            _writeStockNote(
-              sourceConfig,
-              barcode,
-              '更新${_storeLabelForDesc(sourceConfig)}库存${_fmtNum(newSrcStock)}（原库存${_fmtNum(srcStock)}）',
-              '更新${_storeLabelForDesc(sourceConfig)}库存',
-              opName,
-              srcData.uid?.toString(),
-            ),
-            _writeStockNote(
-              targetConfig,
-              barcode,
-              '更新${_storeLabelForDesc(targetConfig)}库存${_fmtNum(newTgtStock)}（原库存${_fmtNum(tgtStock)}）',
-              '更新${_storeLabelForDesc(targetConfig)}库存',
-              opName,
-              tgtData.uid?.toString(),
-            ),
+            writeBothNotes(
+                sourceConfig, srcData.uid?.toString(), sourceResult.storeName),
+            writeBothNotes(
+                targetConfig, tgtData.uid?.toString(), targetResult.storeName),
           ]);
+          if (noteErrors.isNotEmpty) {
+            final detail = '操作：门店模式调货（记录要写到调出店、调入店两家）\n'
+                '条码：$barcode\n'
+                '调货：${sourceResult.storeName} → ${targetResult.storeName}，$qty 件\n'
+                '操作员：$opName\n'
+                '时间：${DateTime.now()}\n\n'
+                '两家门店各自要写两行（调出店一行、调入店一行）。\n'
+                '没写进去的：\n${noteErrors.join('\n')}';
+            _showCopyableError('调货已完成，但部分商品描述没写入', detail);
+          }
           _query(barcode);
         } else {
           final parts = <String>[
