@@ -3075,11 +3075,13 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             line,
             productUid: t.st.data!.uid?.toString(),
             matchLabel: matchKey,
-            // 只精确替换「同一家门店」那一行。
-            // 不再动老版本写的、没有门店标签的「更新库存…」记录 ——
-            // 那种行属于别家门店，之前当成老行顶掉，把别人的记录删了（真实事故）。
-            // 只清掉中间那版误写的「更新全部库存…」行。
-            dropMatcher: (l) => l.contains('更新全部库存'),
+            // 匹配顺序：① 同一家门店那一行；② 没有门店标识的老库存行（顶掉它）。
+            alsoMatch: QueryService.isUnlabeledStockNote,
+            // 收尾清理：没有门店标识的库存行 + 误写的「更新全部库存…」行，
+            // 全部清掉，只留下各门店带标识的记录。
+            dropMatcher: (l) =>
+                l.contains('更新全部库存') ||
+                QueryService.isUnlabeledStockNote(l),
           );
           if (descErr != null) noteSkipped.add('${t.st.storeName}：$descErr');
         }
@@ -4847,8 +4849,10 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         line,
         productUid: productUid,
         matchLabel: matchKey,
-        // 只精确替换同一家门店那一行；老的、没门店标签的记录不动（避免删到别家店的）
-        dropMatcher: (l) => l.contains('更新全部库存'),
+        // 同一家门店那一行优先；没有就顶掉「没有门店标识」的老库存行
+        alsoMatch: QueryService.isUnlabeledStockNote,
+        dropMatcher: (l) =>
+            l.contains('更新全部库存') || QueryService.isUnlabeledStockNote(l),
       );
     } catch (_) {
       // 记录写入失败不阻断调货

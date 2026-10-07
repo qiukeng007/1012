@@ -3179,6 +3179,18 @@ class QueryService {
 
   /// 把一行操作记录合并进商品描述：同类型行替换，其它行原样保留。
   /// [matchKey] 用于定位要替换的那一行（例如「更新商品售价」）。
+  /// 「没有门店标识」的库存记录（旧版本或其它 App 写的），例如
+  /// `2026.10.05 张三：更新库存93（原库存24）`。
+  /// 这种行看不出属于哪家门店 —— 用户明确要求：写库存时把它们清掉，
+  /// 换成带门店标识的（`更新C2库存93（原库存24）`）。
+  /// 注意：带门店标识的行不含「更新库存」这四个连续字，所以不会被误判。
+  static bool isUnlabeledStockNote(String line) {
+    if (!line.contains('（原库存')) return false;
+    return line.contains('更新库存') ||
+        line.contains('修改商品库存') ||
+        line.contains('编辑库存');
+  }
+
   static String mergeOperationNoteLine(
     String? description,
     String newLine,
