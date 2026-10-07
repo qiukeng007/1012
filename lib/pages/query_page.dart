@@ -3075,11 +3075,10 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             line,
             productUid: t.st.data!.uid?.toString(),
             matchLabel: matchKey,
-            // 老版本写的是没门店标签的「更新库存…」；中间那版误写过
-            // 「更新全部库存…」，两种都顶掉
-            alsoMatch: (l) =>
-                l.contains('（原库存') &&
-                (l.contains('更新库存') || l.contains('更新全部库存')),
+            // 只精确替换「同一家门店」那一行。
+            // 不再动老版本写的、没有门店标签的「更新库存…」记录 ——
+            // 那种行属于别家门店，之前当成老行顶掉，把别人的记录删了（真实事故）。
+            // 只清掉中间那版误写的「更新全部库存…」行。
             dropMatcher: (l) => l.contains('更新全部库存'),
           );
           if (descErr != null) noteSkipped.add('${t.st.storeName}：$descErr');
@@ -4848,10 +4847,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         line,
         productUid: productUid,
         matchLabel: matchKey,
-        // 老的无门店标签的库存行，以及中间那版误写的「更新全部库存…」，一并顶掉
-        alsoMatch: (l) =>
-            l.contains('（原库存') &&
-            (l.contains('更新库存') || l.contains('更新全部库存')),
+        // 只精确替换同一家门店那一行；老的、没门店标签的记录不动（避免删到别家店的）
         dropMatcher: (l) => l.contains('更新全部库存'),
       );
     } catch (_) {
