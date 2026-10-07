@@ -179,13 +179,13 @@ class _ModeSelectPageState extends State<ModeSelectPage> {
             store: false,
             title: '总部模式',
             subtitle: '该模式需要使用总账号登录，且旗下门店大于一家',
-            points: ['修改数据可同步到所有门店', '内部版本 1012-2'],
+            points: ['修改数据可同步到所有门店', '模式编号 1012-2'],
           ),
           _optionCard(
             store: true,
             title: '门店模式',
             subtitle: '该模式支持账号密码登录与员工工号登录',
-            points: ['可添加不同门店', '内部版本 1012-1'],
+            points: ['可添加不同门店', '模式编号 1012-1'],
           ),
           const SizedBox(height: 8),
           SizedBox(

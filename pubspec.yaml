@@ -1,7 +1,7 @@
 name: pospal_stock_app
 description: 银豹多店库存查询 - Android App
 publish_to: 'none'
-version: 1.0.12+15
+version: 1.0.12+17
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

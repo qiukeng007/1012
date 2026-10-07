@@ -1580,8 +1580,8 @@ class _SettingsPageState extends State<SettingsPage> {
             const SizedBox(height: 6),
             Text(
               storeMode
-                  ? '逐店填写账号/工号/密码分别登录（内部版本 1012-1）'
-                  : '总账号登录（内部版本 1012-2）',
+                  ? '逐店填写账号/工号/密码分别登录（模式编号 1012-1）'
+                  : '总账号登录（模式编号 1012-2）',
               style: const TextStyle(
                   fontSize: 12, color: AppConstants.textPrimary),
             ),
