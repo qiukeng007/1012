@@ -255,7 +255,10 @@ class _SettingsPageState extends State<SettingsPage> {
         _printerConfigs = printers;
         _printerProfiles = profiles;
         _activeProfile = active;
-        _appVersion = info.version;
+        // 显示成「1.0.12（内部版本1012-13）」：
+        // 1012 = 版本号去掉点；后面的数字 = pubspec 的 build 号（每次打包 +1）
+        _appVersion =
+            '${info.version}（内部版本${info.version.replaceAll('.', '')}-${info.buildNumber}）';
         _loading = false;
       });
       // 同步控制器（并修复历史遗留：全局后台地址被旧逻辑降级成 http://）
