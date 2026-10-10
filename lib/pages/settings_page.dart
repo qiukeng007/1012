@@ -43,6 +43,9 @@ class SettingsPage extends StatefulWidget {
   final VoidCallback? onConfigChanged;
   final int refreshTick;
 
+  /// 配置页当前是否显示在屏幕上（主页切页时由 HomePage 传进来）
+  final bool isCurrent;
+
   const SettingsPage({
     super.key,
     required this.configService,
@@ -50,13 +53,20 @@ class SettingsPage extends StatefulWidget {
     required this.sessionManager,
     this.onConfigChanged,
     this.refreshTick = 0,
+    this.isCurrent = true,
   });
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsPageState extends State<SettingsPage> {
+class _SettingsPageState extends State<SettingsPage>
+    with AutomaticKeepAliveClientMixin {
+  /// 配置页挂在 PageView 上；不保活的话，每次切走 State 就被销毁，
+  /// 切回来又跑一遍首次加载 → 用户看到的就是「每次点配置页都转圈」。
+  @override
+  bool get wantKeepAlive => true;
+
   List<StoreConfig> _configs = [];
   RestockConfig _restockConfig = const RestockConfig();
   List<PrinterConfig> _printerConfigs = [];
@@ -891,6 +901,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin 要求
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -898,10 +909,11 @@ class _SettingsPageState extends State<SettingsPage> {
     return ListView(
       padding: const EdgeInsets.only(bottom: 24),
       children: [
-        // 操作员条码：长期显示在配置页最上面，方便扫码枪扫屏
+        // 条码卡：长期显示在配置页最上面，方便扫码枪扫屏
+        // 第一张固定是操作员条码（内容不可编辑），后面能自己加卡、自己填条码内容
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-          child: const OperatorBarcodeCard(),
+          child: BarcodeCardsPanel(isVisible: widget.isCurrent),
         ),
         if (_storeMode) ...[
           // 门店模式：全局后台地址（可编辑，逐店工号登录）

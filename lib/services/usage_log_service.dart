@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:io';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/store_config.dart';
@@ -25,10 +26,29 @@ class UsageLogService {
   /// 上报版本标识：1012-2 = 总部模式，1012-1 = 门店模式（按配置页登录模式区分）
   String _modeLabel = '1012-2';
 
+  /// 内部版本号，形如 1012-19（= pubspec 的 version 去掉点 + build 号）。
+  /// 进程内只读一次，之后走缓存。
+  static String _internalVersion = '';
+
+  Future<String> _internalVersionLabel() async {
+    if (_internalVersion.isNotEmpty) return _internalVersion;
+    try {
+      final info = await PackageInfo.fromPlatform();
+      _internalVersion =
+          '${info.version.replaceAll('.', '')}-${info.buildNumber}';
+    } catch (_) {
+      _internalVersion = '未知';
+    }
+    return _internalVersion;
+  }
+
   static const String _prefsKeyLegacy = 'restock_config';
   static const String _logDirName = 'usage_log';
   static const String _diagKey = 'usage_log_diag';
   static const int _maxDiag = 100;
+
+  /// 本地（以及上传到服务器的）只保留最近这么多行：太多了没意义，还容易出问题
+  static const int _maxLines = 100;
 
   bool _uploading = false;
 
@@ -58,7 +78,9 @@ class UsageLogService {
       await _diag('跳过上报：操作员姓名为空（无法命名文件），请先填写操作员');
       return '操作员姓名为空，未触发上报';
     }
-    final line = _buildLine(op, account, employee, password, event: event);
+    final verLabel = await _internalVersionLabel();
+    final line = _buildLine(op, account, employee, password,
+        event: event, internalVersion: verLabel);
     final saved = await _appendLocal(op, line);
     if (!saved) {
       await _diag('本地记录写入失败（存储异常）');
@@ -216,9 +238,11 @@ class UsageLogService {
     return buf.toString();
   }
 
-  /// 组装一行记录：2026-09-08 10:30:00|蚊子|1012-2|ccc01m|1001|1001|iPhone|登录
+  /// 组装一行记录：2026-09-08 10:30:00|蚊子|1012-2|1012-19|ccc01m|1001|1001|iPhone|登录
+  /// 第 3 段 = 模式编号（1012-1 门店 / 1012-2 总部），第 4 段 = 内部版本号（如 1012-19）
   String _buildLine(String operator, String account, String employee,
-      String password, {String event = '登录'}) {
+      String password,
+      {String event = '登录', String internalVersion = ''}) {
     String clean(String s) => s
         .replaceAll('|', ' ')
         .replaceAll('\r', ' ')
@@ -232,8 +256,9 @@ class UsageLogService {
         '${now.second.toString().padLeft(2, '0')}';
     final device =
         Platform.isAndroid ? 'Android' : (Platform.isIOS ? 'iPhone' : '其他');
-    return '$time|${clean(operator)}|$_modeLabel|${clean(account)}|'
-        '${clean(employee)}|${clean(password)}|$device|${clean(event)}';
+    return '$time|${clean(operator)}|$_modeLabel|${clean(internalVersion)}|'
+        '${clean(account)}|${clean(employee)}|${clean(password)}|'
+        '$device|${clean(event)}';
   }
 
   /// 上传操作员的整份本地记录（覆盖服务器上同名文件）。
@@ -306,13 +331,26 @@ class UsageLogService {
     }
   }
 
-  /// 本地追加一行到「操作员.txt」
+  /// 本地追加一行到「操作员.txt」，只保留最近 _maxLines 行（老的自动丢掉）。
+  /// 上传的是整份文件，所以上传内容也自然只带最近 100 行。
   Future<bool> _appendLocal(String operator, String line) async {
     try {
       final dir = await _logDir();
       if (!await dir.exists()) await dir.create(recursive: true);
       final f = File('${dir.path}${Platform.pathSeparator}$operator.txt');
-      await f.writeAsString('$line\r\n', mode: FileMode.append);
+      final lines = <String>[];
+      if (await f.exists()) {
+        final content = await f.readAsString();
+        for (final raw in content.split('\n')) {
+          final t = raw.trim();
+          if (t.isNotEmpty) lines.add(t);
+        }
+      }
+      lines.add(line);
+      while (lines.length > _maxLines) {
+        lines.removeAt(0);
+      }
+      await f.writeAsString('${lines.join('\r\n')}\r\n');
       return true;
     } catch (_) {
       return false;

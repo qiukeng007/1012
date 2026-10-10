@@ -1361,6 +1361,7 @@ class _HomePageState extends State<HomePage>
                 sessionManager: _sessionManager,
                 onConfigChanged: _onConfigChanged,
                 refreshTick: _settingsRefreshTick,
+                isCurrent: _currentTab == _settingsTabIndex,
               ),
             ],
           ),
