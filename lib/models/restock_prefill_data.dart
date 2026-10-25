@@ -13,6 +13,9 @@ class RestockPrefillData {
   /// 查询页刚提交过照片时会带上它：补货直接用这张发，不用等队列先同步。
   final List<int>? imageBytes;
 
+  /// true = 这份预填是给「顾客预订」的；false = 日常补货
+  final bool booking;
+
   const RestockPrefillData({
     required this.barcode,
     this.uid,
@@ -22,6 +25,7 @@ class RestockPrefillData {
     this.buyPrice,
     this.sellPrice,
     this.imageUrl,
+    this.booking = false,
     this.imageBytes,
   });
 }

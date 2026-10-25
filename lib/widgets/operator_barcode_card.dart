@@ -111,7 +111,13 @@ Future<void> showBarcodeLargeDialog(
                   onTap: () => Navigator.pop(ctx),
                   child: Container(
                     color: Colors.white,
-                    padding: const EdgeInsets.all(8),
+                    // 静区：竖排时模块沿上下方向，上下各留 70；横排时左右各留 20
+                    padding: EdgeInsets.only(
+                      left: vertical ? 6 : 20,
+                      right: vertical ? 6 : 20,
+                      top: vertical ? 70 : 10,
+                      bottom: vertical ? 70 : 10,
+                    ),
                     child: vertical
                         ? SizedBox(
                             width: 120,
@@ -395,7 +401,8 @@ class _BarcodeCardsPanelState extends State<BarcodeCardsPanel> {
           borderRadius: BorderRadius.circular(6),
           border: Border.all(color: AppConstants.dividerColor),
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        // 留够静区（Code128 两侧各要 10 个模块的白边，只留 4px 扫码枪很难读）
         child: LayoutBuilder(
           builder: (c, cons) =>
               buildBarcodeBars(text, cons.maxWidth, cons.maxHeight),

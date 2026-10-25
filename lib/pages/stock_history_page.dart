@@ -32,7 +32,8 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
   bool _loading = false;
   String? _error;
   List<StockHistoryResult> _results = [];
-  int _selectedDays = 30;
+  /// 每次进「变动明细」都默认看最近 7 天（不沿用上次的选择）
+  int _selectedDays = 7;
   DateTime? _customStart;
   DateTime? _customEnd;
 
@@ -46,10 +47,27 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
 
   String _rangeLabel(int days) => days == 0 ? '全部' : '$days天';
 
+  /// 自定义范围直接显示在标签上（例：10.01~10.07；不是今年的会带上年份）
+  String _customLabel() {
+    final s = _customStart;
+    final e = _customEnd;
+    if (s == null || e == null) return '自定义';
+    String two(int v) => v.toString().padLeft(2, '0');
+    final nowYear = DateTime.now().year;
+    final withYear = s.year != nowYear || e.year != nowYear;
+    String f(DateTime d) => withYear
+        ? '${d.year}.${two(d.month)}.${two(d.day)}'
+        : '${two(d.month)}.${two(d.day)}';
+    return '${f(s)}~${f(e)}';
+  }
+
   @override
   void initState() {
     super.initState();
-    _loadSavedRange();
+    // 第一帧之后再查（_search 里会 setState）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _search();
+    });
   }
 
   @override
@@ -61,25 +79,6 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
     super.dispose();
   }
 
-  /// 读取上次选择的时间范围，读完后自动查询
-  Future<void> _loadSavedRange() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final savedDays = prefs.getInt(_prefsDaysKey);
-      if (savedDays != null &&
-          (savedDays == -1 || savedDays == 0 || _dayOptions.contains(savedDays))) {
-        _selectedDays = savedDays;
-      }
-      if (_selectedDays == -1) {
-        final s = prefs.getString(_prefsCustomStartKey);
-        final e = prefs.getString(_prefsCustomEndKey);
-        if (s != null) _customStart = DateTime.tryParse(s);
-        if (e != null) _customEnd = DateTime.tryParse(e);
-      }
-    } catch (_) {}
-    if (!mounted) return;
-    _search();
-  }
 
   /// 保存当前选择的时间范围
   Future<void> _saveRange() async {
@@ -186,7 +185,10 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
           // 日期快捷选择
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-            child: Row(
+            // 自定义选中后标签会变长（10.01~10.07），整行允许横向滚动，不会溢出
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
               children: [
                 const Icon(Icons.date_range,
                     size: 16, color: AppConstants.textSecondary),
@@ -210,14 +212,15 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
                 Padding(
                   padding: const EdgeInsets.only(right: 6),
                   child: ChoiceChip(
-                    label: const Text('自定义',
-                        style: TextStyle(fontSize: 12)),
+                    label: Text(_customLabel(),
+                        style: const TextStyle(fontSize: 12)),
                     selected: _selectedDays == -1,
                     onSelected: _loading ? null : (_) => _pickCustomRange(),
                     visualDensity: VisualDensity.compact,
                   ),
                 ),
               ],
+            ),
             ),
           ),
           Expanded(child: _buildBody()),

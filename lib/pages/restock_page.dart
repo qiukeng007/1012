@@ -69,6 +69,24 @@ class _RestockPageState extends State<RestockPage>
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
     _tabController.addListener(() => setState(() {}));
+    _openBookingIfNeeded();
+  }
+
+  @override
+  void didUpdateWidget(covariant RestockPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.prefillData != null &&
+        widget.prefillData != oldWidget.prefillData) {
+      _openBookingIfNeeded();
+    }
+  }
+
+  /// 从查询页点「顾客预订」过来时，自动切到第 2 个页签
+  void _openBookingIfNeeded() {
+    if (widget.prefillData?.booking != true) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _tabController.index != 1) _tabController.animateTo(1);
+    });
   }
 
   @override
@@ -262,7 +280,8 @@ class _ReplenishFormState extends State<_ReplenishForm> {
   @override
   void initState() {
     super.initState();
-    if (widget.prefillData != null) {
+    // 「顾客预订」带过来的预填不在这里用（那边自己会填）
+    if (widget.prefillData != null && !widget.prefillData!.booking) {
       _applyPrefill(widget.prefillData!);
     }
   }
@@ -430,6 +449,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
   void didUpdateWidget(covariant _ReplenishForm oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.prefillData != null &&
+        !widget.prefillData!.booking &&
         widget.prefillData != oldWidget.prefillData) {
       _applyPrefill(widget.prefillData!);
       widget.onPrefillConsumed?.call();
@@ -1344,6 +1364,8 @@ class _BookingFormState extends State<_BookingForm> {
   final _barcodeCtrl = TextEditingController();
   final _qtyCtrl = TextEditingController(text: '1');
   final _descCtrl = TextEditingController();
+  /// 从查询页点「顾客预订」进来时，电话框自动拿焦点（手机号键盘直接弹出来）
+  final _phoneFocus = FocusNode();
   File? _imageFile;
   bool _submitting = false;
 
@@ -1354,25 +1376,114 @@ class _BookingFormState extends State<_BookingForm> {
     _barcodeCtrl.dispose();
     _qtyCtrl.dispose();
     _descCtrl.dispose();
+    _phoneFocus.dispose();
     super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // 从查询页点「顾客预订」直接进来：预填已经在身上了，这里补一次
+    final data = widget.prefillData;
+    if (data != null && data.booking) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _applyPrefill(data);
+        widget.onPrefillConsumed?.call();
+      });
+    }
   }
 
   @override
   void didUpdateWidget(covariant _BookingForm oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.prefillData != null &&
+        widget.prefillData!.booking &&
         widget.prefillData != oldWidget.prefillData) {
       _applyPrefill(widget.prefillData!);
       widget.onPrefillConsumed?.call();
     }
   }
 
+  /// 把查询页带过来的商品信息填进表单：
+  /// 供货商 / 条码 / 规格说明（商品名 + 规格）/ 图片，最后把光标放到「顾客电话」上。
   void _applyPrefill(RestockPrefillData data) {
     setState(() {
       _selectedShop = data.supplier.isNotEmpty ? data.supplier : null;
     });
     _shopCtrl.text = data.supplier;
     _barcodeCtrl.text = data.barcode;
+    if (_descCtrl.text.trim().isEmpty) {
+      final parts = <String>[
+        if (data.productName.isNotEmpty) data.productName,
+        if (data.specification.isNotEmpty && data.specification != '-')
+          data.specification,
+      ];
+      _descCtrl.text = parts.join(' ');
+    }
+    final localBytes = data.imageBytes;
+    if (localBytes != null && localBytes.isNotEmpty) {
+      unawaited(_useLocalImage(localBytes, data.imageUrl));
+    } else if (data.imageUrl != null && data.imageUrl!.isNotEmpty) {
+      unawaited(_downloadImage(data.imageUrl!));
+    }
+    // 电话框自动拿焦点 → 系统直接弹出手机号键盘
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _phoneFocus.requestFocus();
+    });
+  }
+
+  /// 队列里刚提交、还没同步完的照片：直接用本地字节
+  Future<void> _useLocalImage(List<int> bytes, String? fallbackUrl) async {
+    final blank = ImageQuality.blankReason(bytes, label: '刚提交的照片');
+    if (blank != null) {
+      if (fallbackUrl != null && fallbackUrl.isNotEmpty) {
+        await _downloadImage(fallbackUrl);
+      } else if (mounted) {
+        _showMsg('刚提交的照片不可用，请重新拍照');
+      }
+      return;
+    }
+    final (normalized, _) = ImageQuality.normalizeForUpload(bytes);
+    final use = normalized ?? bytes;
+    try {
+      final out = File(
+          '${Directory.systemTemp.path}/prefill_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      await out.writeAsBytes(use, flush: true);
+      if (!mounted) return;
+      setState(() => _imageFile = out);
+    } catch (e) {
+      if (mounted) _showMsg('照片写入失败：$e');
+    }
+  }
+
+  /// 查询结果里的商品图：下载 → 校验/压缩 → 填进图片框
+  Future<void> _downloadImage(String url) async {
+    final path = await ProductImageCache.ensureDownloaded(url);
+    if (!mounted || path == null) return;
+    List<int>? raw;
+    try {
+      raw = await File(path).readAsBytes();
+    } catch (_) {
+      raw = null;
+    }
+    if (!mounted || raw == null || raw.isEmpty) return;
+    final blank = ImageQuality.blankReason(raw, label: '自动获取的照片');
+    if (blank != null) {
+      _showMsg('自动获取的照片不可用，请重新拍照');
+      return;
+    }
+    final (normalized, _) = ImageQuality.normalizeForUpload(raw);
+    final use = normalized ?? raw;
+    try {
+      final out = File(
+          '${Directory.systemTemp.path}/prefill_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      await out.writeAsBytes(use, flush: true);
+      if (!mounted) return;
+      setState(() => _imageFile = out);
+    } catch (_) {
+      if (mounted) setState(() => _imageFile = File(path));
+    }
   }
 
   Future<void> _pickImage() async {
@@ -1580,6 +1691,7 @@ class _BookingFormState extends State<_BookingForm> {
             const SizedBox(height: 6),
             TextFormField(
               controller: _phoneCtrl,
+              focusNode: _phoneFocus,
               decoration: _inputDecoration(hint: '手机号'),
               keyboardType: AppConstants.phoneKeyboard,
               validator: (v) {

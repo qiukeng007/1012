@@ -224,6 +224,11 @@ class NotifyService {
   StreamSubscription<dynamic>? _sub;
   bool _started = false;
 
+  /// 内存里这份设置有没有从原生（安卓侧 SharedPreferences）读过。
+  /// 没读过就不能写：否则会把默认值（空名单 / 空屏蔽词）整份写回去，
+  /// 用户设好的「监听哪些应用」「屏蔽词」就被抹掉了。
+  bool _settingsLoaded = false;
+
   /// 通知监听到底连上了没（授权开着也可能没连上，重启 App 后经常这样）
   final ValueNotifier<bool> listenerConnected = ValueNotifier<bool>(false);
   Timer? _connectWatch;
@@ -236,6 +241,9 @@ class NotifyService {
     if (_started) return;
     _started = true;
     if (!supported) return;
+    // 先把已存的设置读进内存（应用名单 / 屏蔽词都在里面），
+    // 不然之后任何一次保存都会用默认值把用户设好的东西盖掉。
+    await ensureSettingsLoaded();
     try {
       _sub = _events.receiveBroadcastStream().listen(_onRaw, onError: (_) {});
     } catch (_) {}
@@ -371,23 +379,39 @@ class NotifyService {
     unread.value = 0;
   }
 
+  /// 第一次用到设置时，从原生把已存的设置读进内存（只读一次）。
+  Future<void> ensureSettingsLoaded() async {
+    if (_settingsLoaded || !supported) return;
+    await loadSettings();
+  }
+
   Future<NotifySettings> loadSettings() async {
     if (!supported) return settings.value;
     NotifySettings parsed;
+    bool ok = false;
     try {
       final raw = await _ch.invokeMethod<String>('getSettings') ?? '';
       parsed = raw.isEmpty
           ? NotifySettings()
           : NotifySettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+      ok = true;
     } catch (_) {
       parsed = NotifySettings();
     }
     settings.value = parsed;
+    // 只有真的从系统读到了才算「已加载」；读失败不标记，后面还能重试
+    if (ok) _settingsLoaded = true;
     return parsed;
   }
 
   Future<void> saveSettings(NotifySettings s) async {
     if (!supported) return;
+    // 还没从系统读过就不写：内存里是默认值（空名单 / 空屏蔽词），
+    // 写回去会把用户已经存好的东西抹掉。先读一次；还是读不到就放弃这次保存。
+    if (!_settingsLoaded) {
+      await ensureSettingsLoaded();
+      if (!_settingsLoaded) return;
+    }
     try {
       await _ch.invokeMethod<bool>('setSettings',
           {'json': jsonEncode(s.toJson())});

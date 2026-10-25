@@ -1382,14 +1382,28 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
         // 补货 + 打印按钮
         const SizedBox(height: 10),
-        SizedBox(
-            width: double.infinity,
-            child: _actionBtn(
-                _restockBtnLabel(r, firstData),
-                Icons.add_shopping_cart,
-                AppConstants.primaryColor,
-                () => _handleRestock(r),
-                enabled: !_dataBusy)),
+        // 一颗按钮从中间分开：左「顾客预订」右「补货」
+        Row(
+          children: [
+            Expanded(
+              child: _actionBtn(
+                  '顾客预订',
+                  Icons.event_available,
+                  const Color(0xFF00897B),
+                  () => _handleRestock(r, booking: true),
+                  enabled: !_dataBusy),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: _actionBtn(
+                  _restockBtnLabel(r, firstData),
+                  Icons.add_shopping_cart,
+                  AppConstants.primaryColor,
+                  () => _handleRestock(r),
+                  enabled: !_dataBusy),
+            ),
+          ],
+        ),
         const SizedBox(height: 6),
         Row(children: [
           if (_hasIp('p1')) Expanded(child: _actionBtn('大价签80', Icons.print, const Color(0xFFFF9800), () => _handleDirectPrint(r, 'p1'))),
@@ -2620,7 +2634,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     }
   }
 
-  void _handleRestock(MultiStoreResult r) {
+  void _handleRestock(MultiStoreResult r, {bool booking = false}) {
     final firstData = _currentProductData(r);
     final barcode = (firstData?.barcode.isNotEmpty == true)
         ? firstData!.barcode
@@ -2645,6 +2659,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         buyPrice: firstData?.buyPrice,
         sellPrice: firstData?.sellPrice,
         imageUrl: prefillImageUrl,
+        booking: booking,
         // 队列里刚提交、还没传完的照片：补货直接用这张发，不用等队列
         imageBytes: _localPhotoBytes[barcode],
         uid: firstData?.uid?.toString(),

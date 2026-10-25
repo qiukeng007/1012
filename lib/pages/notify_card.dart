@@ -138,6 +138,12 @@ Future<bool> saveAndVerifyNotifySettings(
   if (back.apps.length != wanted.apps.length) {
     diffs.add('监听应用个数：界面 ${wanted.apps.length} / 系统 ${back.apps.length}');
   }
+  if (back.appMode != wanted.appMode) {
+    diffs.add('监听范围：界面 ${wanted.appMode} / 系统 ${back.appMode}');
+  }
+  if (back.skipWords != wanted.skipWords) {
+    diffs.add('屏蔽词：界面 ${wanted.skipWords.length} 字 / 系统 ${back.skipWords.length} 字');
+  }
   if (diffs.isNotEmpty) {
     if (context.mounted) showNotifyNotSavedDialog(context, diffs);
     return false;
@@ -257,12 +263,19 @@ class _NotifyRunBarState extends State<NotifyRunBar>
 
   /// 圆钮：按下就是「启动 / 停止」语音播报（原来那个开关）
   Future<void> _toggleRun() async {
+    // 先把已存的设置读进内存（应用名单 / 屏蔽词都在里面），
+    // 否则这一按会把默认值（空名单 / 空屏蔽词）整份写回去。
+    await _service.ensureSettingsLoaded();
+    if (!mounted) return;
     final s = _service.settings.value;
     final on = !s.speak;
     s.speak = on;
     await saveAndVerifyNotifySettings(context, s);
     // 刚要开始播报，就顺手确认监听是连着的
     if (on) unawaited(_service.ensureConnected());
+    // 关掉时立刻掐断正在念的那一条（原生侧会清队列 + stop 语音 + stop 播放），
+    // 不然它会把这一句念完才停。
+    if (!on) unawaited(_service.stopSpeak());
     if (!mounted) return;
     await _refreshRuntime();
     if (!mounted) return;
