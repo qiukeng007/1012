@@ -8,9 +8,9 @@ on:
 jobs:
   build:
     runs-on: macos-15
-    env:
-      PUB_HOSTED_URL: https://pub.flutter-io.cn
-      FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
+    # 注意：不要用国内镜像（storage.flutter-io.cn / pub.flutter-io.cn）。
+    # GitHub 的 macOS 构建机在美国，拉镜像会卡死（曾卡 30 分钟装不上 Flutter）。
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
