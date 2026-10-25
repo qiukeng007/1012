@@ -450,6 +450,8 @@ class _NotifySettingsCardState extends State<NotifySettingsCard> {
   bool _foldOpen = false;
   bool _loading = true;
   bool _skipSeeded = false;
+  /// 屏蔽词改完自动存（防用户忘了点「保存设置」）
+  Timer? _skipSaveTimer;
   String _speakStatus = '';
   String _runtimeText = '';
   bool _connected = true;
@@ -462,6 +464,7 @@ class _NotifySettingsCardState extends State<NotifySettingsCard> {
 
   @override
   void dispose() {
+    _skipSaveTimer?.cancel();
     _skipCtrl.dispose();
     super.dispose();
   }
@@ -1017,11 +1020,18 @@ class _NotifySettingsCardState extends State<NotifySettingsCard> {
         const SizedBox(height: 6),
         TextField(
           controller: _skipCtrl,
-          maxLines: 3,
+          maxLines: 4,
           minLines: 2,
+          // 改完 0.7 秒自动存，不用再去找「保存设置」
+          onChanged: (_) {
+            _skipSaveTimer?.cancel();
+            _skipSaveTimer = Timer(const Duration(milliseconds: 700), () {
+              if (mounted) _save();
+            });
+          },
           decoration: const InputDecoration(
             isDense: true,
-            hintText: '例如：条新消息、红包、验证码',
+            hintText: '一行一个（也可用逗号/分号分隔），命中就不念',
             border: OutlineInputBorder(),
           ),
           style: const TextStyle(fontSize: 13),

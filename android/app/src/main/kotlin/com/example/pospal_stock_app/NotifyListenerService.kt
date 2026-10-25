@@ -409,14 +409,31 @@ class NotifyListenerService : NotificationListenerService() {
         }
     }
 
-    /** 命中屏蔽词就返回那个词（标题、正文各匹配一次，不区分大小写） */
+    /**
+     * 命中屏蔽词就返回那个词（标题、正文各匹配一次，不区分大小写）。
+     *
+     * 分隔符宽容一点：换行 / 中英文逗号 / 分号 都算（空格不算，词里本来可能有空格）。
+     * 另外再拿「去掉所有空白」的副本比一次 —— 通知里常有多余空格/换行，
+     * 用户填的是连着的词，直接包含比会漏。
+     */
     private fun hitsSkipWord(raw: String, title: String, text: String): String? {
-        val words = raw.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+        val words = raw.split('\n', ',', '，', ';', '；')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
         if (words.isEmpty()) return null
+        fun squash(s: String): String {
+            val sb = StringBuilder(s.length)
+            for (c in s) if (!c.isWhitespace()) sb.append(c)
+            return sb.toString().lowercase()
+        }
         val hay = listOf(title, text, "$title $text").map { it.lowercase() }
+        val haySquashed = listOf(title, text, "$title$text").map { squash(it) }
         for (w in words) {
             val needle = w.lowercase()
             if (hay.any { it.contains(needle) }) return w
+            val needleSquashed = squash(w)
+            if (needleSquashed.isNotEmpty() &&
+                haySquashed.any { it.contains(needleSquashed) }) return w
         }
         return null
     }

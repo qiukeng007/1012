@@ -227,10 +227,12 @@ object NotifyConfig {
     fun inUseNow(ctx: Context): Boolean {
         if (!screenOnNow(ctx)) return false
         if (userPresent) return true
-        if (screenJustLit()) return false
         // 读不到就不猜：宁可当成「可能没解锁」，也别把正在用手机的人判成不在。
         return keyguardCleared(ctx) == true
     }
+    // 注：不再用「刚亮屏 8 秒」那一档。
+    // 那会让「屏幕亮着 + 已解锁」的前 8 秒仍然被当成「人不在」→ 亮屏也播报。
+    // 跟眼镜项目 core/ScreenGate.kt 对齐：只有「亮着 + 解锁」才算人在用。
 
     /**
      * 只在「监听服务刚连上」时用一次：屏幕正常亮着就先当成人在用。
