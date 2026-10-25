@@ -634,7 +634,12 @@ class _NotifySettingsCardState extends State<NotifySettingsCard> {
       ),
     );
     if (result == null) return;
-    setState(() => cur.apps = result);
+    setState(() {
+      cur.apps = result;
+      // 勾了具体应用就自动改成「只监听我勾选的」——
+      // 否则用户以为选好了，实际还是「全部应用」在念
+      if (result.isNotEmpty) cur.appMode = 1;
+    });
     await _service.installedApps();
     await _save(toast: true);
   }

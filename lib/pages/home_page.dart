@@ -1303,6 +1303,8 @@ class _HomePageState extends State<HomePage>
           PageView(
             controller: _pageController,
             onPageChanged: (i) {
+              // 切页就把输入焦点释放掉，键盘自动收起
+              FocusManager.instance.primaryFocus?.unfocus();
               setState(() => _currentTab = i);
               // 打开配置页也触发静默获取供货商（手动模式下仅一次）
               if (i == _settingsTabIndex) _maybeSilentFetchSuppliers();
@@ -1419,6 +1421,8 @@ class _HomePageState extends State<HomePage>
         currentIndex: _currentTab,
         type: BottomNavigationBarType.fixed,
         onTap: (index) {
+          // 点底部导航也算切页：先放掉焦点把键盘收起来
+          FocusManager.instance.primaryFocus?.unfocus();
           _pageController.animateToPage(index,
               duration: const Duration(milliseconds: 300),
               curve: Curves.easeOut);
