@@ -951,7 +951,11 @@ class _NotifySettingsCardState extends State<NotifySettingsCard> {
                     ),
                     selected: s.appMode == m,
                     onSelected: (_) async {
-                      setState(() => s.appMode = m);
+                      setState(() {
+                        s.appMode = m;
+                        // 选「全部应用」就把名单清空：原生只要看到名单非空就只念名单里的
+                        if (m == 0) s.apps = <String>[];
+                      });
                       await _save();
                     },
                   ),

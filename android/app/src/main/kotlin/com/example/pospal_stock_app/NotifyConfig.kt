@@ -47,9 +47,12 @@ object NotifyConfig {
 
     /** 这个应用要不要监听（抓取 + 播报） */
     fun appAllowed(ctx: Context, pkg: String): Boolean {
-        val sp = prefs(ctx)
-        if (sp.getInt(KEY_APP_MODE, 0) != 1) return true
-        return appList(ctx).contains(pkg)
+        val list = appList(ctx)
+        // 只要名单里有东西，就按名单来 —— 用户勾了应用，就是不希望别的念。
+        // 以前必须先手动切到「只监听勾选」，没切就全放，看起来就是「选了也白选」。
+        if (list.isNotEmpty()) return list.contains(pkg)
+        // 名单是空的：模式=「只监听勾选」时谁都不念；否则全放
+        return prefs(ctx).getInt(KEY_APP_MODE, 0) != 1
     }
 
     /** 现在在不在「启用时段」内（没开启用时段就永远算在） */

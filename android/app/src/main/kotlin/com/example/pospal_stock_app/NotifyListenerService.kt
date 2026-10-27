@@ -417,7 +417,7 @@ class NotifyListenerService : NotificationListenerService() {
      * 用户填的是连着的词，直接包含比会漏。
      */
     private fun hitsSkipWord(raw: String, title: String, text: String): String? {
-        val words = raw.split('\n', ',', '，', ';', '；')
+        val words = raw.split('\n', '\r', ',', '，', ';', '；')
             .map { it.trim() }
             .filter { it.isNotEmpty() }
         if (words.isEmpty()) return null

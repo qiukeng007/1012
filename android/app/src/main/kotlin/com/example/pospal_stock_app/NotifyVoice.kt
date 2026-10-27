@@ -484,15 +484,20 @@ object NotifyVoice {
             .setSampleRate(wav.sampleRate)
             .setChannelMask(chMask)
             .build()
+        // 输出设备：0 跟随系统 / 1 手机扬声器 / 2 蓝牙
+        // 蓝牙这一档必须自己挑：没连耳机时系统会默默退回手机外放，「没戴耳机就不该响」就失效了。
+        // 所以没蓝牙设备时直接不播（记录里会写原因）。
+        val dev = pickDevice(ctx)
+        if (route == 2 && dev == null) {
+            lastError = "没连蓝牙耳机，跳过播报"
+            return
+        }
         val t = AudioTrack.Builder()
             .setAudioAttributes(attrs)
             .setAudioFormat(format)
             .setBufferSizeInBytes(bufSize)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-        // 只有「强制手机扬声器」才自己指定输出设备。跟随系统 / 蓝牙交给系统去路由：
-        // 硬指定蓝牙设备，在 LE Audio、设备刚断开等情况下会变成「哪个地方都不出声」。
-        val dev = if (route == 1) pickDevice(ctx) else null
         if (dev != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             try {
                 t.preferredDevice = dev
