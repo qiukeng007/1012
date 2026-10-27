@@ -346,7 +346,10 @@ class NotifyListenerService : NotificationListenerService() {
         }
 
         val sp = NotifyConfig.prefs(this)
-        val skipped = hitsSkipWord(sp.getString(NotifyConfig.KEY_SKIP_WORDS, "").orEmpty(), title, text)
+        val skipped = hitsSkipWord(
+            sp.getString(NotifyConfig.KEY_SKIP_WORDS, "").orEmpty(),
+            app, title, text
+        )
         // 启用时段：只在用户设定的时间段内工作（不设就是全天）
         val outOfWindow = !NotifyConfig.inActiveWindow(this)
         // 「亮屏时也播报」关掉之后：正在用手机时只录不念。
@@ -416,7 +419,12 @@ class NotifyListenerService : NotificationListenerService() {
      * 另外再拿「去掉所有空白」的副本比一次 —— 通知里常有多余空格/换行，
      * 用户填的是连着的词，直接包含比会漏。
      */
-    private fun hitsSkipWord(raw: String, title: String, text: String): String? {
+    private fun hitsSkipWord(
+        raw: String,
+        app: String,
+        title: String,
+        text: String,
+    ): String? {
         val words = raw.split('\n', '\r', ',', '，', ';', '；')
             .map { it.trim() }
             .filter { it.isNotEmpty() }
@@ -426,8 +434,11 @@ class NotifyListenerService : NotificationListenerService() {
             for (c in s) if (!c.isWhitespace()) sb.append(c)
             return sb.toString().lowercase()
         }
-        val hay = listOf(title, text, "$title $text").map { it.lowercase() }
-        val haySquashed = listOf(title, text, "$title$text").map { squash(it) }
+        // 应用名也一起比：用户写「短信」「微信」这种词时，标题/正文里往往根本找不到
+        val hay = listOf(app, title, text, "$title $text", "$app $title $text")
+            .map { it.lowercase() }
+        val haySquashed = listOf(app, title, text, "$title$text", "$app$title$text")
+            .map { squash(it) }
         for (w in words) {
             val needle = w.lowercase()
             if (hay.any { it.contains(needle) }) return w
