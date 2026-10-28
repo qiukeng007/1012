@@ -292,10 +292,37 @@ class NotifyListenerService : NotificationListenerService() {
         if (flags and Notification.FLAG_ONGOING_EVENT != 0) return
 
         val ex = n.extras
-        var title = ex.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
-        var text = ex.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
-        val big = ex.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim().orEmpty()
-        if (big.length > text.length) text = big
+        // 标题 / 正文多取几个字段（对齐眼镜项目 NotifyRelayService.titleOf / textOf）：
+        // 短信、银行、外卖这类 App 常把正文放在 SUB_TEXT / TEXT_LINES 里，
+        // 只读 EXTRA_TEXT 会拿到空串 —— 屏蔽词就一条都命中不了。
+        var title = (ex.getCharSequence(Notification.EXTRA_TITLE)
+            ?: ex.getCharSequence(Notification.EXTRA_TITLE_BIG))
+            ?.toString()?.trim().orEmpty()
+        var text = (ex.getCharSequence(Notification.EXTRA_BIG_TEXT)
+            ?: ex.getCharSequence(Notification.EXTRA_TEXT)
+            ?: ex.getCharSequence(Notification.EXTRA_SUB_TEXT))
+            ?.toString()?.trim().orEmpty()
+        // 展开后的多行正文
+        try {
+            val lines = ex.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+            if (lines != null && lines.isNotEmpty()) {
+                val joined = lines.joinToString(
+                    "\n"
+                ) { it?.toString()?.trim().orEmpty() }.trim()
+                if (joined.isNotEmpty() && !text.contains(joined)) {
+                    text = if (text.isEmpty()) joined else text + "\n" + joined
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        // 摘要行（例如「3 条新消息」）
+        val summary = ex.getCharSequence(Notification.EXTRA_SUMMARY_TEXT)
+            ?.toString()?.trim().orEmpty()
+        if (summary.isNotEmpty() &&
+            !text.contains(summary) && !title.contains(summary)
+        ) {
+            text = if (text.isEmpty()) summary else text + "\n" + summary
+        }
 
         // 聊天类通知：带多条消息时取最后一条，能分清「谁说的」和「说了什么」
         val msgs = try {
@@ -326,7 +353,10 @@ class NotifyListenerService : NotificationListenerService() {
         if ((pkg == "com.whatsapp" || pkg == "com.whatsapp.w4b") && title.isNotEmpty()) {
             stripLeadingSelf(text, title)?.let { text = it }
         }
-        if (title.isEmpty() && text.isEmpty()) return
+        if (title.isEmpty() && text.isEmpty()) {
+            lastSkip = "通知没有可读文字"
+            return
+        }
 
         val app = appLabel(pkg)
         val now = System.currentTimeMillis()
