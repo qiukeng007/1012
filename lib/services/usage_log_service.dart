@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/store_config.dart';
 import 'mode_service.dart';
+import 'config_service.dart';
 
 /// 静默上报登录使用记录（无任何界面提示，不打扰用户）
 ///
@@ -52,6 +53,9 @@ class UsageLogService {
 
   bool _uploading = false;
 
+  /// 「使用扫描」每个进程只记一次（避免每扫一下就把整份日志重传）
+  bool _scanReported = false;
+
   /// 上报一次使用记录（登录成功=登录，App 冷启动补记=启动）：
   /// 先本地追加一行，再整份上传（失败自动保留待补传）。
   /// 返回本次处理结果说明（供配置页“立即测试”显示；正常登录为静默调用）。
@@ -92,6 +96,47 @@ class UsageLogService {
       return '已记录本地，但服务器地址为空';
     }
     return flushPending(operator: op, serverUrl: svr);
+  }
+
+  /// 扫过码：往后台日志补一行「使用扫描」。
+  /// 每个 App 进程只记一次（每扫一次就整份上传会把服务器打爆）。
+  Future<void> reportScanUsage() async {
+    if (_scanReported) return;
+    _scanReported = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final op = await _loadOperator(prefs);
+      if (op.isEmpty) return; // 没操作员就没法命名文件
+      final svr = await _loadServerUrl(prefs);
+      await ModeService.instance.ensureLoaded();
+      _modeLabel = ModeService.instance.isStoreMode ? '1012-1' : '1012-2';
+      var account = '';
+      var employee = '';
+      var password = '';
+      if (ModeService.instance.isStoreMode) {
+        final configs = await ConfigService().loadConfigs();
+        final c =
+            configs.where((e) => e.enabled).firstOrNull ?? configs.firstOrNull;
+        if (c != null) {
+          account = c.account.trim();
+          employee = c.cashierJobNumber.trim();
+          password = c.password;
+        }
+      } else {
+        account = (prefs.getString('login_account') ?? '').trim();
+        employee = (prefs.getString('login_employee') ?? '').trim();
+        password = prefs.getString('login_password') ?? '';
+      }
+      final ver = await _internalVersionLabel();
+      final line = _buildLine(op, account, employee, password,
+          event: '使用扫描', internalVersion: ver);
+      final saved = await _appendLocal(op, line);
+      if (!saved) return;
+      await _diag('已本地记录：$line');
+      if (svr.isNotEmpty) {
+        await flushPending(operator: op, serverUrl: svr);
+      }
+    } catch (_) {}
   }
 
   /// 应用启动或登录后调用：把本地各操作员记录整份上传到服务器

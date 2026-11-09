@@ -72,6 +72,7 @@ class RestockService {
     String barcode = '',
     required String quantity,
     String desc = '',
+    String stockPriceNote = '',
     List<int>? imageBytes,
     String? imageName,
   }) async {
@@ -81,6 +82,7 @@ class RestockService {
       barcode: barcode,
       quantity: quantity,
       desc: desc,
+      stockPriceNote: stockPriceNote,
       imageBytes: imageBytes,
       imageName: imageName,
     );
@@ -122,6 +124,7 @@ class RestockService {
     required String barcode,
     required String quantity,
     required String desc,
+    String stockPriceNote = '',
     String? phone,
     List<int>? imageBytes,
     String? imageName,
@@ -171,11 +174,13 @@ class RestockService {
     final sentOp = opName.trim();
     final sentPhone = (phone ?? '').trim();
     final sentQty = quantity.trim();
+    final sentStockNote = stockPriceNote.trim();
 
     addField('shopname', sentShop);
     addField('barcode', sentBarcode);
     addField('quantity', sentQty);
     addField('desc', sentDesc);
+    addField('stockprice', sentStockNote);
     addField('Operators', sentOp);
     if (sentPhone.isNotEmpty) {
       addField('phone', sentPhone);
@@ -195,6 +200,7 @@ class RestockService {
       'barcode=$sentBarcode',
       'quantity=$sentQty',
       'desc=$sentDesc',
+      'stockprice=$sentStockNote',
       if (sentPhone.isNotEmpty) 'phone=$sentPhone',
       'Operators=$sentOp',
       'image=$fileName（$imageInfo）',

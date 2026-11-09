@@ -38,7 +38,8 @@ class _StockHistoryPageState extends State<StockHistoryPage> {
   DateTime? _customEnd;
 
   // 快捷日期选项（选择自定义后 _selectedDays = -1）
-  static const _dayOptions = [7, 30, 90];
+  static const _dayOptions = [7, 30, 90, 0];
+  // 0 = 全部（反结账等老记录不会因为超过 7/30/90 天被时间范围挡掉）
 
   // 上次选择的时间范围持久化（下次进入自动沿用）
   static const _prefsDaysKey = 'stock_history_days';

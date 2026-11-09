@@ -21,6 +21,7 @@ import '../services/session_manager.dart';
 import '../services/query_logger.dart';
 import '../services/operation_log_service.dart';
 import '../services/restock_log_service.dart';
+import '../services/usage_log_service.dart';
 import '../services/advanced_settings_service.dart';
 import '../utils/image_quality.dart';
 import 'stock_history_page.dart';
@@ -94,6 +95,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   final FocusNode _barcodeFocus = FocusNode();
   final ScrollController _scrollController = ScrollController();
   bool _querying = false;
+  /// 条码框默认数字键盘；点小键盘图标切成字母/中文键盘（条码里有字母时用）
+  bool _barcodeLetters = false;
   String? _error;
   MultiStoreResult? _lastResult;
 
@@ -180,6 +183,21 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     });
   }
 
+  /// 条码输入框：数字键盘 / 字母键盘互换（默认数字）
+  void _toggleBarcodeKeyboard() {
+    setState(() => _barcodeLetters = !_barcodeLetters);
+    // 已经聚焦时系统不会换键盘：先收起来，下一帧再聚焦
+    _barcodeFocus.unfocus();
+    Future<void>.delayed(const Duration(milliseconds: 80), () {
+      if (!mounted) return;
+      _barcodeFocus.requestFocus();
+      _barcodeController.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _barcodeController.text.length,
+      );
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -263,11 +281,15 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     final code =
         data.barcode.trim().isNotEmpty ? data.barcode.trim() : barcode.trim();
     if (code.isEmpty) return;
-    if (_extCounts.containsKey(code) || _extCountAsked.contains(code)) return;
-    _extCountAsked.add(code);
-    // 列表自带的条数先显示着（详情回来后覆盖成准确的）
+    // 列表自带的条数先显示着（详情回来后覆盖成准确的）。
+    // 以前这里是「查过就不再写」，但初次的详情请求慢/失败时数字就永远不出现；
+    // 现在列表里能看到几条就先写进去。
     final fromList = QueryService.extBarcodeCountFromList(data.extBarcodeRaw);
-    if (fromList > 0) _extCounts[code] = fromList;
+    if (fromList > 0 && (_extCounts[code] ?? 0) < fromList) {
+      _extCounts[code] = fromList;
+    }
+    if (_extCountAsked.contains(code)) return;
+    _extCountAsked.add(code);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_loadExtCount(code, data.uid?.toString()));
     });
@@ -282,6 +304,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           .fetchProductExtBarcodes(store, code, productUid: productUid);
       // 查不到就保留列表里带的条数：这只是个提示，不打扰用户
       if (err != null || !mounted) return;
+      // 详情没返回条目时不把已有的数字抹成 0（列表那一列偶尔只给主条码）
+      if (list.isEmpty) return;
       setState(() => _extCounts[code] = list.length);
     } catch (_) {}
   }
@@ -311,7 +335,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     final code = data.barcode.trim().isNotEmpty
         ? data.barcode.trim()
         : fallbackBarcode.trim();
-    final count = _extCounts[code] ?? 0;
+    // 详情接口还没回来时，先用列表里的条数（否则网络慢就看不到这个数字）
+    final fromList = QueryService.extBarcodeCountFromList(data.extBarcodeRaw);
+    final count = _extCounts[code] ?? fromList;
     if (count <= 0) return null;
     return _extCountBadge(count);
   }
@@ -510,6 +536,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     _detailTried.clear(); // 新搜索允许重新补拉商品详情（描述/创建日期）
     _detailInfo.clear(); // 描述/创建日期也一起清：银豹那边改了要能立刻看到最新的
     _localPhotoBytes.clear(); // 本地队列照片也一起清，避免串到别的商品
+    // 扩展条码条数也重新核对（上次超时/失败的，这次重新搜还能补上）
+    _extCounts.clear();
+    _extCountAsked.clear();
 
     setState(() {
       _querying = true;
@@ -2651,8 +2680,20 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       prefillImageUrl = prefillImageUrl!.replaceAll('_200x200', '');
     }
     if (mounted && widget.onNavigateToRestock != null) {
+      // 各门店库存（按查询结果里的门店顺序），随补货单一起上报
+      final storeStocks = <String, String>{};
+      // 必须按首页门店顺序（store1、store2…），不能按请求完成先后：
+      // 并发查询时哪个店先回来，map 里就先插入哪个，会让老店排到新店前面
+      final entries = r.stores.entries.toList()
+        ..sort((a, b) =>
+            _storeKeyOrder(a.key).compareTo(_storeKeyOrder(b.key)));
+      for (final e in entries) {
+        final st = e.value.data?.stock;
+        if (st != null) storeStocks[e.value.storeName] = _fmtNum(st);
+      }
       widget.onNavigateToRestock!(RestockPrefillData(
         barcode: barcode,
+        storeStocks: storeStocks,
         supplier: firstData?.supplier ?? '',
         productName: (firstData?.name ?? '').replaceAll('&', ''),
         specification: firstData?.specification ?? '',
@@ -2717,8 +2758,12 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                       controller: _barcodeController,
                       focusNode: _barcodeFocus,
                       enabled: !_dataBusy,
-                      // 条码框：默认数字键盘，但要能切换到字母/中文（按名称搜索）
-                      keyboardType: AppConstants.numberKeyboard(),
+                      // 默认数字键盘；切换后走「英文键盘」（密码变体，输入法不会弹中文）
+                      keyboardType: _barcodeLetters
+                          ? TextInputType.visiblePassword
+                          : AppConstants.numberKeyboard(),
+                      enableSuggestions: false,
+                      autocorrect: false,
                       decoration: InputDecoration(
                         hintText: '扫描或输入条码',
                         isDense: true,
@@ -2729,11 +2774,41 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(AppConstants.radiusSm),
                         ),
-                        suffixIcon: IconButton(
-                          icon: const Icon(Icons.search, size: 22),
-                          onPressed: _dataBusy
-                              ? null
-                              : () => _query(_barcodeController.text),
+                        suffixIconConstraints: const BoxConstraints(
+                            minWidth: 34, minHeight: 34),
+                        suffixIcon: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              onPressed: _dataBusy
+                                  ? null
+                                  : _toggleBarcodeKeyboard,
+                              tooltip: _barcodeLetters
+                                  ? '切换数字键盘'
+                                  : '切换字母键盘',
+                              padding: EdgeInsets.zero,
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints(
+                                  minWidth: 34, minHeight: 34),
+                              icon: Icon(
+                                _barcodeLetters
+                                    ? Icons.dialpad
+                                    : Icons.keyboard_alt_outlined,
+                                size: 20,
+                                color: AppConstants.textSecondary,
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.search, size: 22),
+                              padding: EdgeInsets.zero,
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints(
+                                  minWidth: 34, minHeight: 34),
+                              onPressed: _dataBusy
+                                  ? null
+                                  : () => _query(_barcodeController.text),
+                            ),
+                          ],
                         ),
                       ),
                       style: const TextStyle(fontSize: 16),
@@ -2764,6 +2839,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                             if (result != null) {
                               _barcodeController.text = result;
                               _query(result);
+                              // 后台留一条「使用扫描」记录（每个进程只记一次）
+                              unawaited(
+                                  UsageLogService.instance.reportScanUsage());
                             }
                           },
                     style: ElevatedButton.styleFrom(
@@ -3681,6 +3759,12 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     return s;
   }
 
+  /// store1/store2… 的门店顺序（并发查询完成顺序 ≠ 首页门店顺序）
+  int _storeKeyOrder(String key) {
+    final m = RegExp(r'\d+').firstMatch(key);
+    return m == null ? 9999 : int.tryParse(m.group(0)!) ?? 9999;
+  }
+
   /// 解析售价输入（允许 R 前缀、千分位逗号、空格），非法返回 null
   double? _parseSellPriceInput(String raw) {
     final t = raw
@@ -4535,6 +4619,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     if (!mounted) return;
     final v = (scanned ?? '').trim();
     if (v.isEmpty) return;
+    unawaited(UsageLogService.instance.reportScanUsage());
     final cur = controller.text.trim();
     final next = cur.isEmpty ? v : '$cur,$v';
     controller.text = next;

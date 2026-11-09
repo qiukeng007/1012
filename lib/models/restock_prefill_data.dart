@@ -16,6 +16,10 @@ class RestockPrefillData {
   /// true = 这份预填是给「顾客预订」的；false = 日常补货
   final bool booking;
 
+  /// 查询时各门店的库存（门店名 → 库存文本），按门店顺序。
+  /// 提交补货时写成「进价 + 各店库存」存到服务器的「库存进价说明」。
+  final Map<String, String> storeStocks;
+
   const RestockPrefillData({
     required this.barcode,
     this.uid,
@@ -27,5 +31,6 @@ class RestockPrefillData {
     this.imageUrl,
     this.booking = false,
     this.imageBytes,
+    this.storeStocks = const {},
   });
 }

@@ -1087,6 +1087,11 @@ class QueryService {
                 log['stockFlowId'] ??
                 '')
             .toString();
+        // 银豹后台的备注列可能是服务端生成的：原始 remark 为空时，
+        // 用单据流水号补齐，跟后台看到的一致
+        final remarkText = remark.trim().isNotEmpty
+            ? remark
+            : (sn.trim().isNotEmpty ? '单据流水号：${sn.trim()}' : '');
         final operator =
             (log['CashierNameNumber'] ?? log['operatorName'] ?? log['operator'] ?? '-')
                 .toString();
@@ -1095,14 +1100,22 @@ class QueryService {
         // 银豹部分出库类型（如货流调出 stockout）只返回 incrementQuantity，
         // 方向需按 changeType 判定，否则会显示成 +N 而实际是 -N
         final ct = (log['changeType'] as String? ?? '').toLowerCase();
+        final ctNorm = ct.replaceAll(RegExp(r'[^a-z]'), '');
+        // 反结账 = 把已结账的销售撤回来，库存是加回去的。
+        // 银豹后台显示「商品销售反结账 +1」，不能因为带 sell/sale 就算成减。
+        final isReverse = ctNorm.contains('reverse') ||
+            ctNorm.contains('anticheckout') ||
+            ctNorm.contains('uncheckout');
         const reduceTypes = {
-          'sale', 'sell', 'stocksell', 'stockout', 'loss', 'anticheckout',
+          'sale', 'sell', 'stocksell', 'stockout', 'loss',
         };
-        final isReduceType =
-            reduceTypes.contains(ct) || ct.contains('sell') || ct.contains('sale');
+        final isReduceType = !isReverse &&
+            (reduceTypes.contains(ct) ||
+                ct.contains('sell') ||
+                ct.contains('sale'));
         double? stockChange;
         if (reduce != 0) {
-          stockChange = -reduce;
+          stockChange = isReverse ? reduce : -reduce;
         } else if (increment != 0) {
           stockChange = isReduceType ? -increment : increment;
         } else if (update != 0) {
@@ -1122,10 +1135,13 @@ class QueryService {
           index: i + 1,
           time: log['dateTime']?.toString() ?? '',
           operator: operator,
-          changeType: _mapStockChangeType(log['changeType']?.toString() ?? ''),
+          changeType: _mapStockChangeType(
+            log['changeType']?.toString() ?? '',
+            remark: remark,
+          ),
           stockChange: stockChange,
           correctedStock: exactStock,
-          remark: remark,
+          remark: remarkText,
           sn: sn.isEmpty ? null : sn,
         ));
         if (exactStock != null) prevStock = exactStock;
@@ -1157,8 +1173,17 @@ class QueryService {
   }
 
   /// 银豹变动类型编码 → 中文
-  String _mapStockChangeType(String code) {
-    switch (code.toLowerCase()) {
+  String _mapStockChangeType(String code, {String remark = ''}) {
+    // 编码可能带下划线/空格/后缀（如 antiCheckoutOrder），先归一化再比
+    final c = code.toLowerCase().replaceAll(RegExp(r'[^a-z]'), '');
+    // 反结账：银豹后台的显示名是「商品销售反结账」（不是笼统的「反结账」）
+    if (c.contains('reverse') ||
+        c.contains('anticheckout') ||
+        c.contains('uncheckout')) {
+      if (c.contains('wholesale')) return '大客户销售作废';
+      return '商品销售反结账';
+    }
+    switch (c) {
       case 'editstock': return '编辑库存';
       case 'sale': case 'stocksell': return '商品销售';
       case 'return': case 'stockreturn': return '客户退货';
@@ -1166,9 +1191,19 @@ class QueryService {
       case 'stockout': return '货流调出';
       case 'loss': return '商品报损';
       case 'unpack': return '组装拆分';
-      case 'anticheckout': return '反结账';
+      case 'anticheckout':
+      case 'anticheckoutorder':
+      case 'uncheckout':
+      case 'cancelcheckout':
+      case 'voidcheckout':
+        return '商品销售反结账';
       case 'newproduct': return '初始库存';
-      default: return code;
+      default:
+        // 接口没给类型编码、但备注写了反结账的，也归到反结账
+        if (remark.contains('反结账') || remark.contains('取消结账')) {
+          return '商品销售反结账';
+        }
+        return code;
     }
   }
 

@@ -108,6 +108,7 @@ class _SettingsPageState extends State<SettingsPage>
   final TextEditingController _photoFilterCtrl = TextEditingController();
   String _photoFilter = '';
   bool _photoShowAll = false;
+  Timer? _photoJobsDebounce;
   // 电池优化白名单状态（保活用：不在白名单里，锁屏后系统可能冻结 App）
   Future<bool>? _batteryOptFuture;
 
@@ -128,10 +129,24 @@ class _SettingsPageState extends State<SettingsPage>
     await _loadConfigs();
   }
 
-  /// 队列/日志变化后刷新显示
-  Future<void> _reloadPhotoJobs() async {
-    final jobs = await PhotoQueueService.instance.allJobs();
-    if (mounted) setState(() => _photoJobs = jobs);
+  /// 队列/日志变化后刷新显示（防抖 + 内容没变就不重建，避免配置页滚动/展开时卡顿）
+  void _reloadPhotoJobs() {
+    _photoJobsDebounce?.cancel();
+    _photoJobsDebounce = Timer(const Duration(milliseconds: 400), () async {
+      final jobs = await PhotoQueueService.instance.allJobs();
+      if (!mounted) return;
+      final same = jobs.length == _photoJobs.length &&
+          List<bool>.generate(jobs.length, (i) {
+            final a = jobs[i];
+            final b = _photoJobs[i];
+            return a.id == b.id &&
+                a.status == b.status &&
+                a.results.length == b.results.length &&
+                a.lastError == b.lastError;
+          }).every((e) => e);
+      if (same) return;
+      setState(() => _photoJobs = jobs);
+    });
   }
 
   @override
@@ -147,6 +162,7 @@ class _SettingsPageState extends State<SettingsPage>
   void dispose() {
     _autoSaveTimer?.cancel();
     _serverCheckTimer?.cancel();
+    _photoJobsDebounce?.cancel();
     PhotoQueueService.instance.removeListener(_reloadPhotoJobs);
     _serverCtrl.dispose();
     _suppliersCtrl.dispose();

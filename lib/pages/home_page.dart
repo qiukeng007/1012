@@ -53,7 +53,11 @@ class _StoreVerifyStatus {
 
 class _HomePageState extends State<HomePage>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
-  int _currentTab = 0;
+  /// 当前页签用 ValueNotifier：切换页签不再整页 setState
+  /// （setState 会把 5 个页面全部重建，切补货页/配置页会明显卡顿）
+  final ValueNotifier<int> _tabIndex = ValueNotifier<int>(0);
+  /// 配置页是否正在显示：单独一个 notifier，切别的页签不会白重建配置页
+  final ValueNotifier<bool> _settingsVisible = ValueNotifier<bool>(false);
   final PageController _pageController = PageController();
 
   /// 通知页（抓通知 + 语音播报）只有安卓有：iOS 系统不允许第三方 App 读通知栏，也不支持播报
@@ -145,6 +149,8 @@ class _HomePageState extends State<HomePage>
     _notifyDotTimer?.cancel();
     _restockImageNotifier.dispose();
     _restockSupplierNotifier.dispose();
+    _tabIndex.dispose();
+    _settingsVisible.dispose();
     _pageController.dispose();
     super.dispose();
   }
@@ -662,6 +668,7 @@ class _HomePageState extends State<HomePage>
                   barcode: item.barcode,
                   quantity: item.quantity,
                   desc: item.desc,
+                  stockPriceNote: item.stockPriceNote,
                   imageBytes: imageBytes,
                   imageName: item.imageName,
                 );
@@ -725,8 +732,8 @@ class _HomePageState extends State<HomePage>
   void _navigateToRestock(RestockPrefillData data) {
     setState(() {
       _prefillData = data;
-      _currentTab = 1;
     });
+    _tabIndex.value = 1;
     _pageController.animateToPage(1,
         duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
     _maybeSilentFetchSuppliers();
@@ -1305,7 +1312,8 @@ class _HomePageState extends State<HomePage>
             onPageChanged: (i) {
               // 切页就把输入焦点释放掉，键盘自动收起
               FocusManager.instance.primaryFocus?.unfocus();
-              setState(() => _currentTab = i);
+              _tabIndex.value = i;
+              _settingsVisible.value = i == _settingsTabIndex;
               // 打开配置页也触发静默获取供货商（手动模式下仅一次）
               if (i == _settingsTabIndex) _maybeSilentFetchSuppliers();
               // 打开通知页就算看过了，底部红点清零（iOS 没有通知页，不会命中）
@@ -1344,10 +1352,9 @@ class _HomePageState extends State<HomePage>
                     _pageController.animateToPage(0,
                         duration: const Duration(milliseconds: 300),
                         curve: Curves.easeOut);
-                    setState(() {
-                      _currentTab = 0;
-                      _prefillData = null;
-                    });
+                    _tabIndex.value = 0;
+                    _prefillData = null;
+                    // 不 setState：刚提交完再整页重建会卡一下；下一次重建自然带上 null
                   },
                 )
               else
@@ -1357,13 +1364,16 @@ class _HomePageState extends State<HomePage>
               // Tab 3: 通知（收到通知 + 语音播报）—— 仅安卓有
               if (_hasNotify) const NotifyPage(),
               // Tab 4: 配置
-              SettingsPage(
-                configService: _configService,
-                loginService: _loginService,
-                sessionManager: _sessionManager,
-                onConfigChanged: _onConfigChanged,
-                refreshTick: _settingsRefreshTick,
-                isCurrent: _currentTab == _settingsTabIndex,
+              ValueListenableBuilder<bool>(
+                valueListenable: _settingsVisible,
+                builder: (_, visible, __) => SettingsPage(
+                  configService: _configService,
+                  loginService: _loginService,
+                  sessionManager: _sessionManager,
+                  onConfigChanged: _onConfigChanged,
+                  refreshTick: _settingsRefreshTick,
+                  isCurrent: visible,
+                ),
               ),
             ],
           ),
@@ -1417,8 +1427,10 @@ class _HomePageState extends State<HomePage>
       ),
       // type: fixed —— 不加这个的话，5 个标签时只有选中的那个显示文字（默认 4 个以上就变 shifting）
       // 底部铃铛上不显示未读条数（太占地方），只留那颗状态点
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentTab,
+      bottomNavigationBar: ValueListenableBuilder<int>(
+        valueListenable: _tabIndex,
+        builder: (_, tab, __) => BottomNavigationBar(
+          currentIndex: tab,
         type: BottomNavigationBarType.fixed,
         onTap: (index) {
           // 点底部导航也算切页：先放掉焦点把键盘收起来
@@ -1459,6 +1471,7 @@ class _HomePageState extends State<HomePage>
             label: '配置',
           ),
         ],
+      ),
       ),
     );
   }

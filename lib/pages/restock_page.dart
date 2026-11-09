@@ -14,6 +14,7 @@ import '../services/restock_service.dart';
 import '../services/query_service.dart';
 import '../services/operation_log_service.dart';
 import '../services/restock_log_service.dart';
+import '../services/usage_log_service.dart';
 import '../services/offline_queue_service.dart';
 import '../services/photo_queue_service.dart';
 import '../utils/constants.dart';
@@ -68,7 +69,6 @@ class _RestockPageState extends State<RestockPage>
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
-    _tabController.addListener(() => setState(() {}));
     _openBookingIfNeeded();
   }
 
@@ -168,12 +168,16 @@ class _RestockPageState extends State<RestockPage>
                 borderRadius: BorderRadius.circular(12),
               ),
               padding: const EdgeInsets.all(4),
-              child: Row(
-                children: [
-                  _buildTab(0, '日常补货'),
-                  _buildTab(1, '顾客预定'),
-                  _buildTab(2, '订单查询'),
-                ],
+              // 页签高亮只重建这一行，不整页 setState（动画中每帧重建会卡）
+              child: AnimatedBuilder(
+                animation: _tabController,
+                builder: (ctx, _) => Row(
+                  children: [
+                    _buildTab(0, '日常补货'),
+                    _buildTab(1, '顾客预定'),
+                    _buildTab(2, '订单查询'),
+                  ],
+                ),
               ),
             ),
           ),
@@ -259,10 +263,13 @@ class _ReplenishFormState extends State<_ReplenishForm> {
   String? _originalSupplier;
   final _shopCtrl = TextEditingController();
   final _barcodeCtrl = TextEditingController();
-  final _qtyCtrl = TextEditingController(text: '1');
+  final _qtyCtrl = TextEditingController(text: '36');
   final _descCtrl = TextEditingController();
   final _qtyFocus = FocusNode();
   final _descFocus = FocusNode();
+  final _barcodeFocus = FocusNode();
+  /// 条码框默认数字键盘；点小键盘图标可切成字母/中文键盘
+  bool _barcodeLetters = false;
   File? _imageFile;
   bool _submitting = false;
   /// 用户是否在补货界面手动上传/拍照了新图片（需要同步到银豹，覆盖旧图）
@@ -276,6 +283,8 @@ class _ReplenishFormState extends State<_ReplenishForm> {
   String? _productName;
   bool _lookingUp = false;
   Timer? _lookupTimer;
+  /// 当前进价是属于哪个条码的（换了条码后不能用旧价写库存进价说明）
+  String? _priceBarcode;
 
   @override
   void initState() {
@@ -297,6 +306,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     });
     _shopCtrl.text = data.supplier;
     _barcodeCtrl.text = data.barcode;
+    _priceBarcode = data.barcode.trim();
     // 使用预填的商品名称
     if (data.productName.isNotEmpty && _descCtrl.text.isEmpty) {
       _descCtrl.text = data.productName;
@@ -313,6 +323,15 @@ class _ReplenishFormState extends State<_ReplenishForm> {
       _imageFromUser = false;
       _downloadPrefillImage(data.imageUrl!);
     }
+  }
+
+  void _toggleBarcodeKeyboard() {
+    setState(() => _barcodeLetters = !_barcodeLetters);
+    // 已经聚焦时系统不会换键盘：先收起来，下一帧再聚焦
+    _barcodeFocus.unfocus();
+    Future<void>.delayed(const Duration(milliseconds: 80), () {
+      if (mounted) _barcodeFocus.requestFocus();
+    });
   }
 
   /// 直接用队列里那张刚提交的照片填进图片框。
@@ -392,6 +411,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     _descCtrl.dispose();
     _qtyFocus.dispose();
     _descFocus.dispose();
+    _barcodeFocus.dispose();
     super.dispose();
   }
 
@@ -399,7 +419,12 @@ class _ReplenishFormState extends State<_ReplenishForm> {
   void _onBarcodeChanged(String value) {
     _lookupTimer?.cancel();
     if (value.length < 6) {
-      setState(() { _buyPrice = null; _sellPrice = null; _productName = null; });
+      setState(() {
+        _buyPrice = null;
+        _sellPrice = null;
+        _productName = null;
+        _priceBarcode = null;
+      });
       return;
     }
     _lookupTimer = Timer(const Duration(milliseconds: 500), () => _lookupBarcode(value));
@@ -429,6 +454,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
           _sellPrice = data.sellPrice;
           _productName = data.name.isNotEmpty ? data.name.replaceAll('&', '') : null;
           _productUid = data.uid?.toString();
+          _priceBarcode = barcode.trim();
           _lookingUp = false;
         });
         // 自动填充备注为商品名称
@@ -437,7 +463,11 @@ class _ReplenishFormState extends State<_ReplenishForm> {
         }
       } else {
         setState(() {
-          _buyPrice = null; _sellPrice = null; _productName = null; _lookingUp = false;
+          _buyPrice = null;
+          _sellPrice = null;
+          _productName = null;
+          _priceBarcode = null;
+          _lookingUp = false;
         });
       }
     } catch (_) {
@@ -524,6 +554,74 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     ));
   }
 
+  /// 提交给服务器的「库存进价说明」，用逗号连成一行：
+  /// 进价：13.5，新店库存：12，老店库存：1
+  Future<String> _buildStockPriceNote() async {
+    final lines = <String>[];
+    final code = _barcodeCtrl.text.trim();
+    // 进价/库存都必须对应当前条码：换了条码后不能用上一件商品的旧数据
+    final price = _buyPrice;
+    if (price != null && _priceBarcode == code) {
+      lines.add('进价：${_fmtQty(price)}');
+    }
+    // 查询页带过来的各店库存优先（就是用户看到的那份），
+    // 手动进补货页没带库存时，提交前重新查一次
+    final prefill = widget.prefillData;
+    var stocks = (prefill != null && prefill.barcode.trim() == code)
+        ? prefill.storeStocks
+        : const <String, String>{};
+    if (stocks.isEmpty) stocks = await _queryStoreStocks();
+    stocks.forEach((name, qty) {
+      final v = qty.trim();
+      if (v.isEmpty || v == '—') return;
+      lines.add('${name}库存：$v');
+    });
+    return lines.join('，');
+  }
+
+  /// 手动进补货页时：提交前查一次所有勾选门店的库存
+  Future<Map<String, String>> _queryStoreStocks() async {
+    final qs = widget.queryService;
+    final configs = widget.configs;
+    final code = _barcodeCtrl.text.trim();
+    if (qs == null || configs == null || code.isEmpty) return const {};
+    try {
+      final enabled = configs.where((c) => c.enabled).toList();
+      if (enabled.isEmpty) return const {};
+      // 最多等 8 秒：断网/掉登录时不能把补货提交卡死（拿不到就不写库存行）
+      final result = await qs
+          .queryAllStores(enabled, code)
+          .timeout(const Duration(seconds: 8));
+      final out = <String, String>{};
+      // 按 store1/store2… 排，跟首页门店顺序一致（并发完成顺序不能直接用）
+      final entries = result.stores.entries.toList()
+        ..sort((a, b) => _storeKeyOrder(a.key).compareTo(_storeKeyOrder(b.key)));
+      for (final e in entries) {
+        final st = e.value.data?.stock;
+        if (st != null) out[e.value.storeName] = _fmtQty(st);
+      }
+      return out;
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// 数字显示：去掉多余的小数（13.50→13.5，12.00→12）
+  String _fmtQty(double v) {
+    var s = v.toStringAsFixed(2);
+    if (s.contains('.')) {
+      s = s.replaceFirst(RegExp(r'0+$'), '');
+      s = s.replaceFirst(RegExp(r'\.$'), '');
+    }
+    return s;
+  }
+
+  /// store1/store2… 的门店顺序（并发查询完成顺序 ≠ 首页门店顺序）
+  int _storeKeyOrder(String key) {
+    final m = RegExp(r'\d+').firstMatch(key);
+    return m == null ? 9999 : int.tryParse(m.group(0)!) ?? 9999;
+  }
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     if (_selectedShop == null || _selectedShop!.isEmpty) {
@@ -542,11 +640,13 @@ class _ReplenishFormState extends State<_ReplenishForm> {
     setState(() => _submitting = true);
     try {
       final imageBytes = await _imageFile!.readAsBytes();
+      final stockNote = await _buildStockPriceNote();
       final res = await widget.service.submitReplenish(
         shopName: _selectedShop!,
         barcode: _barcodeCtrl.text,
         quantity: _qtyCtrl.text.trim(),
         desc: _descCtrl.text,
+        stockPriceNote: stockNote,
         imageBytes: imageBytes,
         imageName: 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg',
       );
@@ -639,7 +739,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
             }
           }
         } else {
-          final saved = await _saveReplenishOffline(imageBytes);
+          final saved = await _saveReplenishOffline(imageBytes, stockNote);
           final head = res.shortReason.isNotEmpty
               ? res.shortReason
               : (res.networkFailure ? '连不上补货服务器' : '补货服务器返回错误');
@@ -686,7 +786,8 @@ class _ReplenishFormState extends State<_ReplenishForm> {
   }
 
   /// 补货提交失败时保存到离线队列（内容相同的不重复保存）
-  Future<bool> _saveReplenishOffline(List<int> imageBytes) async {
+  Future<bool> _saveReplenishOffline(List<int> imageBytes,
+      [String stockPriceNote = '']) async {
     try {
       final items = await OfflineQueueService.instance.getItems();
       final barcode = _barcodeCtrl.text;
@@ -709,6 +810,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
           barcode: barcode,
           quantity: quantity,
           desc: desc,
+          stockPriceNote: stockPriceNote,
           imageBase64: base64Encode(imageBytes),
           imageName: 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg',
           createdAt: DateTime.now().toIso8601String(),
@@ -831,7 +933,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
   void _resetForm() {
     _shopCtrl.clear();
     _barcodeCtrl.clear();
-    _qtyCtrl.text = '1';
+    _qtyCtrl.text = '36';
     _descCtrl.clear();
     setState(() {
       _imageFile = null;
@@ -885,8 +987,27 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                 Expanded(
                   child: TextFormField(
                     controller: _barcodeCtrl,
-                    decoration: _inputDecoration(hint: '手动输入或扫码'),
-                    keyboardType: AppConstants.numberKeyboard(),
+                    focusNode: _barcodeFocus,
+                    decoration: _inputDecoration(hint: '手动输入或扫码').copyWith(
+                      suffixIcon: IconButton(
+                        onPressed: _toggleBarcodeKeyboard,
+                        tooltip: _barcodeLetters ? '切换数字键盘' : '切换字母键盘',
+                        padding: EdgeInsets.zero,
+                        visualDensity: VisualDensity.compact,
+                        constraints:
+                            const BoxConstraints(minWidth: 36, minHeight: 36),
+                        icon: Icon(
+                          _barcodeLetters ? Icons.dialpad : Icons.keyboard_alt_outlined,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                    // 默认数字键盘；切换后走英文键盘（密码变体，不会弹中文候选）
+                    keyboardType: _barcodeLetters
+                        ? TextInputType.visiblePassword
+                        : AppConstants.numberKeyboard(),
+                    enableSuggestions: false,
+                    autocorrect: false,
                     onChanged: _onBarcodeChanged,
                   ),
                 ),
@@ -2679,7 +2800,11 @@ class _ScanPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ScannerView(
-      onDetect: (barcode) => Navigator.pop(context, barcode),
+      onDetect: (barcode) {
+        // 后台留一条「使用扫描」记录（每个进程只记一次）
+        unawaited(UsageLogService.instance.reportScanUsage());
+        Navigator.pop(context, barcode);
+      },
       onClose: () => Navigator.pop(context),
     );
   }

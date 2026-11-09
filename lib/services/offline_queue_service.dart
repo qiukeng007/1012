@@ -10,6 +10,8 @@ class OfflineQueueItem {
   final String barcode;
   final String quantity;
   final String desc;
+  /// 提交补货时附带的「进价 + 各店库存」说明
+  final String stockPriceNote;
   final String phone;
   final String imageBase64;
   final String imageName;
@@ -23,6 +25,7 @@ class OfflineQueueItem {
     required this.quantity,
     required this.desc,
     this.phone = '',
+    this.stockPriceNote = '',
     this.imageBase64 = '',
     this.imageName = '',
     required this.createdAt,
@@ -36,6 +39,7 @@ class OfflineQueueItem {
       barcode: json['barcode'] as String? ?? '',
       quantity: json['quantity']?.toString() ?? '',
       desc: json['desc'] as String? ?? '',
+      stockPriceNote: json['stockPriceNote'] as String? ?? '',
       phone: json['phone'] as String? ?? '',
       imageBase64: json['imageBase64'] as String? ?? '',
       imageName: json['imageName'] as String? ?? '',
@@ -50,6 +54,7 @@ class OfflineQueueItem {
         'barcode': barcode,
         'quantity': quantity,
         'desc': desc,
+        'stockPriceNote': stockPriceNote,
         'phone': phone,
         'imageBase64': imageBase64,
         'imageName': imageName,
