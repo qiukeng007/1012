@@ -37,6 +37,14 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    // 打出来的 APK 名字带版本号，例如 银豹查询-1.0.13.apk
+    applicationVariants.all {
+        outputs.all {
+            this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
+            outputFileName = "银豹查询-${versionName}.apk"
+        }
+    }
 }
 
 flutter {

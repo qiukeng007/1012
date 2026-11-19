@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:gal/gal.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/store_config.dart';
 import '../models/product_result.dart';
@@ -2005,6 +2006,26 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
   void _showProductImagePreview(ProductData data, String barcode,
       String? sourceStoreName) {
+  /// 长按放大图：保存到系统相册
+  Future<bool> _savePreviewImage(
+      BuildContext ctx, Uint8List? localBytes, String? url) async {
+    try {
+      final bytes = (localBytes != null && localBytes.isNotEmpty)
+          ? localBytes
+          : (url == null ? null : await ProductImageCache.loadBytes(url));
+      if (bytes == null || bytes.isEmpty) {
+        if (ctx.mounted) _showBanner('图片还没加载好，请稍后再试', isError: true);
+        return false;
+      }
+      await Gal.putImageBytes(bytes,
+          name: 'product_${DateTime.now().millisecondsSinceEpoch}');
+      return true;
+    } catch (e) {
+      if (ctx.mounted) _showCopyableError('保存图片失败', '$e');
+      return false;
+    }
+  }
+
     final key = _photoKey(data, barcode);
     final url = _productImageOverrides[key] ?? data.imageUrl ?? '';
     final localBytes = _localPhotoBytes[key];
@@ -2017,6 +2038,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     // 想换图点一下小图标展开，3 秒后自动收回去
     Timer? hideTimer;
     var showChangeBtn = false;
+    Timer? saveMsgTimer;
+    var savingImage = false;
+    var saveMsg = '';
     final dialog = showDialog(
       context: context,
       // 背景压得很透：放大看图时，下面的商品名称/条码/价格仍然看得清
@@ -2045,7 +2069,14 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                       alignment: Alignment.bottomCenter,
                       child: Padding(
                         padding: EdgeInsets.only(top: topGap, bottom: 8),
-                        child: InteractiveViewer(
+                        child: GestureDetector(
+                          // 长按保存到相册
+                          onLongPress: () => _savePreviewImage(
+                            ctx,
+                            hasLocal ? localBytes : null,
+                            hasLocal ? null : original,
+                          ),
+                          child: InteractiveViewer(
                           maxScale: 5,
                           child: hasLocal
                               ? Image.memory(
@@ -2060,10 +2091,105 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                                   placeholder: const Icon(Icons.broken_image,
                                       size: 64, color: Colors.white70),
                                 ),
+                          ),
                         ),
                       ),
                     ),
                     // 放大界面内选择是否更换照片（默认收起，点小图标才展开）
+                    // 保存图片：和相机按钮一样大小的圆形，放在它上面
+                    Positioned(
+                      right: 16,
+                      bottom: 88,
+                      child: Tooltip(
+                        message: '保存图片到相册',
+                        child: Material(
+                          color: Colors.white.withValues(alpha: 0.45),
+                          shape: const CircleBorder(),
+                          elevation: 0,
+                          child: InkWell(
+                            customBorder: const CircleBorder(),
+                            onTap: savingImage
+                                ? null
+                                : () async {
+                                    setDialogState(() {
+                                      savingImage = true;
+                                      saveMsg = '';
+                                    });
+                                    final ok = await _savePreviewImage(
+                                      ctx,
+                                      hasLocal ? localBytes : null,
+                                      hasLocal ? null : original,
+                                    );
+                                    if (!ctx.mounted) return;
+                                    setDialogState(() {
+                                      savingImage = false;
+                                      saveMsg = ok ? '已保存到相册' : '保存失败';
+                                    });
+                                    saveMsgTimer?.cancel();
+                                    saveMsgTimer = Timer(
+                                        const Duration(seconds: 2), () {
+                                      if (ctx.mounted) {
+                                        setDialogState(() => saveMsg = '');
+                                      }
+                                    });
+                                  },
+                            child: SizedBox(
+                              width: 36,
+                              height: 36,
+                              child: Center(
+                                child: savingImage
+                                    ? const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.black87),
+                                      )
+                                    : const Icon(Icons.save,
+                                        color: Colors.black87, size: 18),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    // 保存反馈：正在保存 / 已保存 / 保存失败
+                    if (savingImage || saveMsg.isNotEmpty)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 130,
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.7),
+                              borderRadius: BorderRadius.circular(18),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (savingImage) ...[
+                                  const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.white),
+                                  ),
+                                  const SizedBox(width: 8),
+                                ],
+                                Text(
+                                  savingImage ? '正在保存…' : saveMsg,
+                                  style: const TextStyle(
+                                      color: Colors.white, fontSize: 12),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
                     Positioned(
                       right: 16,
                       bottom: 28,
@@ -5729,11 +5855,12 @@ class _CandidatePickerDialogState extends State<_CandidatePickerDialog> {
   Widget _kvLine(String text,
       {Color? color, bool bold = false}) {
     return Padding(
-      padding: const EdgeInsets.only(top: 1),
+      padding: EdgeInsets.zero,
       child: Text(
         text,
         style: TextStyle(
-          fontSize: 12,
+          fontSize: 11,
+          height: 1.15,
           color: color,
           fontWeight: bold ? FontWeight.w600 : FontWeight.normal,
         ),
@@ -5751,8 +5878,8 @@ class _CandidatePickerDialogState extends State<_CandidatePickerDialog> {
       insetPadding: EdgeInsets.zero,
       backgroundColor: Colors.transparent,
       child: Container(
-        width: size.width,
-        height: size.height * 2 / 3,
+        width: double.infinity,
+        height: size.height * 0.78,
         decoration: const BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
@@ -5817,7 +5944,7 @@ class _CandidatePickerDialogState extends State<_CandidatePickerDialog> {
                     onTap: () => Navigator.pop(ctx, entry),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
+                          horizontal: 10, vertical: 6),
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
@@ -5827,15 +5954,15 @@ class _CandidatePickerDialogState extends State<_CandidatePickerDialog> {
                                 ? () => setState(() => _previewUrl = p.imageUrl!)
                                 : null,
                             child: SizedBox(
-                              width: 56,
-                              height: 56,
+                              width: 48,
+                              height: 48,
                               child: showThumb
                                   ? _CachedImage(
                                       url: p.imageUrl!,
-                                      width: 56,
-                                      height: 56,
-                                      decodeWidth: 112,
-                                      decodeHeight: 112,
+                                      width: 48,
+                                      height: 48,
+                                      decodeWidth: 96,
+                                      decodeHeight: 96,
                                       radius: 6,
                                     )
                                   : const Icon(Icons.inventory_2_outlined,
@@ -5850,10 +5977,10 @@ class _CandidatePickerDialogState extends State<_CandidatePickerDialog> {
                               children: [
                                 Text(
                                   p.name,
-                                  maxLines: 2,
+                                  maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
-                                      fontSize: 14,
+                                      fontSize: 13,
                                       fontWeight: FontWeight.w600),
                                 ),
                                 const SizedBox(height: 2),
@@ -5891,24 +6018,32 @@ class _CandidatePickerDialogState extends State<_CandidatePickerDialog> {
             // 放大图盖在同一弹窗内，不会被其他页面遮挡
             if (_previewUrl != null)
               Positioned.fill(
-                child: GestureDetector(
-                  onTap: () => setState(() => _previewUrl = null),
-                  child: ClipRRect(
-                    borderRadius: const BorderRadius.vertical(
-                        top: Radius.circular(16)),
+                child: LayoutBuilder(
+                  builder: (_, box) => GestureDetector(
+                    onTap: () => setState(() => _previewUrl = null),
                     child: ColoredBox(
                       color: Colors.white,
-                      child: InteractiveViewer(
-                        minScale: 1,
-                        maxScale: 5,
-                        child: _CachedImage(
-                          url: _previewUrl!,
-                          width: size.width,
-                          height: size.height * 2 / 3,
-                          fit: BoxFit.cover,
-                          radius: 0,
-                          decodeWidth: 1600,
-                          decodeHeight: 1600,
+                      child: ClipRect(
+                        child: InteractiveViewer(
+                          minScale: 1,
+                          maxScale: 5,
+                          clipBehavior: Clip.hardEdge,
+                          child: Image.network(
+                            _previewUrl!.startsWith('http')
+                                ? _previewUrl!
+                                : 'https://img.pospal.cn${_previewUrl!}',
+                            fit: BoxFit.contain,
+                            width: box.maxWidth,
+                            height: box.maxHeight,
+                            loadingBuilder: (c, child, progress) => progress == null
+                                ? child
+                                : const Center(
+                                    child: CircularProgressIndicator()),
+                            errorBuilder: (c, e, s) => const Center(
+                              child: Text('图片加载失败',
+                                  style: TextStyle(color: Colors.grey)),
+                            ),
+                          ),
                         ),
                       ),
                     ),

@@ -61,6 +61,8 @@
 	<string>需要相机权限来扫码条码和拍照补货</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>需要相册权限来选择商品图片</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>需要相册写入权限来保存商品图片</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

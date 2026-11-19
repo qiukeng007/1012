@@ -35,11 +35,11 @@ class UpdateService {
   /// 当前内部版本号，形如 1012.42（与配置页/后台上报一致）
   Future<String> get currentInternalVersion async {
     final info = await PackageInfo.fromPlatform();
-    return '${info.version.replaceAll('.', '')}.${info.buildNumber}';
+    return info.version;
   }
 
   /// 检查更新。
-  /// 返回服务器上的新版本号文本（如 "1012.43"）；已是最新或检查失败返回空字符串。
+  /// 返回服务器上的新版本号文本（如 "1.0.13"）；已是最新或检查失败返回空字符串。
   /// 兼容旧格式：服务器只写 "43" 时按 build 号比较。
   Future<String> checkUpdate(String serverUrl) async {
     final url = normalizeUrl(serverUrl);
@@ -55,23 +55,35 @@ class UpdateService {
     }
 
     final info = await PackageInfo.fromPlatform();
-    final current = <int>[
-      int.tryParse(info.version.replaceAll('.', '')) ?? 0,
-      int.tryParse(info.buildNumber) ?? 0,
-    ];
+    // 当前版本按点分段：1.0.13 → [1, 0, 13]
+    final current = info.version
+        .split('.')
+        .map((e) => int.tryParse(e) ?? 0)
+        .toList();
+    final currentBuild = int.tryParse(info.buildNumber) ?? 0;
 
     try {
-      final uri = Uri.parse('$url/PIC/app_version.txt');
+      // 加时间戳，避免服务器/CDN 缓存旧版本号
+      final uri = Uri.parse(
+          '$url/PIC/app_version.txt?t=${DateTime.now().millisecondsSinceEpoch}');
       final response = await http.get(uri).timeout(const Duration(seconds: 5));
       if (response.statusCode != 200) return '';
       final remoteText = response.body.trim();
       final remote = parse(remoteText);
       if (remote.isEmpty) return '';
 
+      // 旧服务器可能还写着 1012.43 这种老格式：新版 1.x 直接忽略，避免被旧号卡住
+      if (remote.length >= 2 &&
+          remote[0] >= 1000 &&
+          current.isNotEmpty &&
+          current[0] < 1000) {
+        return '';
+      }
+
       bool newer;
       if (remote.length == 1) {
         // 旧格式：只有一个数字，按 build 号比较
-        newer = remote[0] > current.last;
+        newer = remote[0] > currentBuild;
       } else {
         final n = remote.length > current.length ? remote.length : current.length;
         newer = false;
