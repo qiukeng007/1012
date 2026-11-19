@@ -281,10 +281,10 @@ class _SettingsPageState extends State<SettingsPage>
         _printerConfigs = printers;
         _printerProfiles = profiles;
         _activeProfile = active;
-        // 显示成「1.0.12（内部版本1012-13）」：
-        // 1012 = 版本号去掉点；后面的数字 = pubspec 的 build 号（每次打包 +1）
+        // 显示成「1.0.12（内部版本1012.13）」：
+        // 1012 = 版本号去掉点；点后面的数字 = pubspec 的 build 号（每次打包 +1）
         _appVersion =
-            '${info.version}（内部版本${info.version.replaceAll('.', '')}-${info.buildNumber}）';
+            '${info.version}（内部版本${info.version.replaceAll('.', '')}.${info.buildNumber}）';
         _loading = false;
       });
       // 同步控制器（并修复历史遗留：全局后台地址被旧逻辑降级成 http://）
@@ -922,101 +922,89 @@ class _SettingsPageState extends State<SettingsPage>
       return const Center(child: CircularProgressIndicator());
     }
 
-    return ListView(
-      padding: const EdgeInsets.only(bottom: 24),
-      children: [
-        // 条码卡：长期显示在配置页最上面，方便扫码枪扫屏
-        // 第一张固定是操作员条码（内容不可编辑），后面能自己加卡、自己填条码内容
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-          child: BarcodeCardsPanel(isVisible: widget.isCurrent),
-        ),
-        if (_storeMode) ...[
-          // 门店模式：全局后台地址（可编辑，逐店工号登录）
-          Padding(
+    // 懒加载：首次打开配置页只构建屏幕内可见的卡片，
+    // 不再一次把条码卡/门店/打印机/日志全建出来（那会让第一次下拉卡住）。
+    final sections = <Widget Function()>[
+      () => Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-            child: _buildStoreBaseUrlCard(),
+            child: BarcodeCardsPanel(isVisible: widget.isCurrent),
           ),
-          // 补货配置
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: _buildRestockConfigCard(),
-          ),
-          // 门店列表（逐店填写账号/工号/密码并分别登录）
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(children: [
-              ...List.generate(_configs.length, (i) => _buildStoreItem(i)),
-              _buildAddButton(),
-            ]),
-          ),
-        ] else ...[
-          // 总部模式：总账号（总店账号卡片）——后台地址统一在此卡片内设置
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-            child: _buildMasterAccountCard(),
-          ),
-          const SizedBox(height: 8),
-          // 1.6 ID数据管理（门店列表卡片）
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: _buildIdDataCard(),
-          ),
-          // 2. 补货配置
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: _buildRestockConfigCard(),
-          ),
-        ],
-        // 3.5 通知播报（仅安卓）：授权 / 播报 / 应用 / 屏蔽词，默认折起来
-        if (NotifyService.supported) ...[
-          const SizedBox(height: 8),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: const NotifySettingsCard(),
-          ),
-        ],
-        // 4. 打印机配置（固定3台，不可增减）
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: _buildPrinterSection(),
-        ),
-        // 5. 查询诊断日志
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: _buildDiagnosticsCard(),
-        ),
-        // 5b. keepalive log
-        const SizedBox(height: 8),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: _buildKeepAliveCard(),
-        ),
-        // 5c. 照片队列日志
-        const SizedBox(height: 8),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: _buildPhotoQueueCard(),
-        ),
-        // 6. 重置登录模式（两种模式各自保存的数据互相独立，可随时切回）
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: _buildModeResetCard(),
-        ),
-        // 高级设置按钮（验证密码与启动验证一致；远程改 password.txt 后自动同步）
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: _buildAdvancedSettingsButton(),
-        ),
-        // 7. 版本号
-        Padding(
-          padding: const EdgeInsets.only(bottom: 24),
-          child: _buildVersionInfo(),
-        ),
+      if (_storeMode) ...[
+        () => Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: _buildStoreBaseUrlCard(),
+            ),
+        () => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _buildRestockConfigCard(),
+            ),
+        () => Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(children: [
+                ...List.generate(_configs.length, (i) => _buildStoreItem(i)),
+                _buildAddButton(),
+              ]),
+            ),
+      ] else ...[
+        () => Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: _buildMasterAccountCard(),
+            ),
+        () => const SizedBox(height: 8),
+        () => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _buildIdDataCard(),
+            ),
+        () => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _buildRestockConfigCard(),
+            ),
       ],
+      if (NotifyService.supported) ...[
+        () => const SizedBox(height: 8),
+        () => const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              child: NotifySettingsCard(),
+            ),
+      ],
+      () => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _buildPrinterSection(),
+          ),
+      () => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _buildDiagnosticsCard(),
+          ),
+      () => const SizedBox(height: 8),
+      () => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _buildKeepAliveCard(),
+          ),
+      () => const SizedBox(height: 8),
+      () => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _buildPhotoQueueCard(),
+          ),
+      () => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _buildModeResetCard(),
+          ),
+      () => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _buildAdvancedSettingsButton(),
+          ),
+      () => Padding(
+            padding: const EdgeInsets.only(bottom: 24),
+            child: _buildVersionInfo(),
+          ),
+    ];
+
+    return ListView.builder(
+      padding: const EdgeInsets.only(bottom: 24),
+      itemCount: sections.length,
+      itemBuilder: (_, i) => sections[i](),
     );
   }
-
   /// 照片队列日志：按 条码/商品/门店/状态 过滤；
   /// 未输入关键词时默认显示最近 10 条（其余收起），可一键展开全部。
   List<Widget> _buildPhotoJobRows() {

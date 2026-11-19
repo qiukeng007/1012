@@ -27,7 +27,7 @@ class UsageLogService {
   /// 上报版本标识：1012-2 = 总部模式，1012-1 = 门店模式（按配置页登录模式区分）
   String _modeLabel = '1012-2';
 
-  /// 内部版本号，形如 1012-19（= pubspec 的 version 去掉点 + build 号）。
+  /// 内部版本号，形如 1012.19（= pubspec 的 version 去掉点 + "." + build 号）。
   /// 进程内只读一次，之后走缓存。
   static String _internalVersion = '';
 
@@ -36,7 +36,7 @@ class UsageLogService {
     try {
       final info = await PackageInfo.fromPlatform();
       _internalVersion =
-          '${info.version.replaceAll('.', '')}-${info.buildNumber}';
+          '${info.version.replaceAll('.', '')}.${info.buildNumber}';
     } catch (_) {
       _internalVersion = '未知';
     }

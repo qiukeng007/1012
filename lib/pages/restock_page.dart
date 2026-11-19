@@ -1002,9 +1002,9 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                         ),
                       ),
                     ),
-                    // 默认数字键盘；切换后走英文键盘（密码变体，不会弹中文候选）
+                    // 默认数字键盘；切换后走普通英文键盘（邮箱变体，不走安全键盘、能粘贴）
                     keyboardType: _barcodeLetters
-                        ? TextInputType.visiblePassword
+                        ? TextInputType.emailAddress
                         : AppConstants.numberKeyboard(),
                     enableSuggestions: false,
                     autocorrect: false,

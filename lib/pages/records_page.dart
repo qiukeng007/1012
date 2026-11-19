@@ -14,6 +14,7 @@ class RecordsPage extends StatefulWidget {
 class _RecordsPageState extends State<RecordsPage> {
   List<OperationLog> _logs = [];
   Set<String> _favorites = {};
+  Map<String, String> _favReasons = {};
   bool _loading = true;
 
   @override
@@ -25,9 +26,11 @@ class _RecordsPageState extends State<RecordsPage> {
   Future<void> _load() async {
     final logs = await OperationLogService.getAll();
     final favorites = await OperationLogService.getFavoriteIds();
+    final reasons = await OperationLogService.getFavoriteReasons();
     if (mounted) {
       setState(() {
         _favorites = favorites;
+        _favReasons = reasons;
         _logs = _sortedLogs(logs, favorites);
         _loading = false;
       });
@@ -45,12 +48,75 @@ class _RecordsPageState extends State<RecordsPage> {
     return [...fav, ...rest];
   }
 
-  Future<void> _toggleFavorite(OperationLog log) async {
+  /// 收藏/编辑收藏原因
+  Future<void> _editFavorite(OperationLog log) async {
     if (log.id.isEmpty) return;
-    final updated = await OperationLogService.toggleFavoriteId(log.id);
+    final fav = _favorites.contains(log.id);
+    final ctrl = TextEditingController(text: _favReasons[log.id] ?? '');
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(fav ? '收藏原因' : '收藏这条记录',
+            style: const TextStyle(fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('可以写一下为什么要收藏（可不填）：',
+                style: TextStyle(
+                    fontSize: 12, color: AppConstants.textSecondary)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              maxLines: 3,
+              minLines: 1,
+              decoration: const InputDecoration(
+                hintText: '例如：待补货 / 客户预订',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消')),
+          if (fav)
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'remove'),
+              child: const Text('取消收藏',
+                  style: TextStyle(color: AppConstants.errorColor)),
+            ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, 'save'),
+            child: Text(fav ? '保存' : '收藏'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || action == null) return;
+    if (action == 'remove') {
+      final updated = await OperationLogService.toggleFavoriteId(log.id);
+      if (!mounted) return;
+      setState(() {
+        _favorites = updated;
+        _favReasons.remove(log.id);
+        _logs = _sortedLogs(_logs, updated);
+      });
+      return;
+    }
+    final updated =
+        await OperationLogService.setFavoriteReason(log.id, ctrl.text);
     if (!mounted) return;
     setState(() {
       _favorites = updated;
+      if (ctrl.text.trim().isEmpty) {
+        _favReasons.remove(log.id);
+      } else {
+        _favReasons[log.id] = ctrl.text.trim();
+      }
       _logs = _sortedLogs(_logs, updated);
     });
   }
@@ -145,7 +211,7 @@ class _RecordsPageState extends State<RecordsPage> {
                                         ? Colors.amber
                                         : AppConstants.textSecondary,
                                   ),
-                                  onPressed: () => _toggleFavorite(log),
+                                  onPressed: () => _editFavorite(log),
                                 ),
                                 Text(log.time, style: const TextStyle(fontSize: 11, color: AppConstants.textSecondary)),
                               ]),
@@ -157,6 +223,29 @@ class _RecordsPageState extends State<RecordsPage> {
                                 Expanded(child: Text('${log.barcode}  📋点击复制',
                                   style: const TextStyle(fontSize: 12, color: AppConstants.textSecondary))),
                               ]),
+                              if (fav &&
+                                  (_favReasons[log.id]?.isNotEmpty ?? false)) ...[
+                                const SizedBox(height: 4),
+                                InkWell(
+                                  onTap: () => _editFavorite(log),
+                                  child: Row(children: [
+                                    const Icon(Icons.star,
+                                        size: 13, color: Colors.amber),
+                                    const SizedBox(width: 4),
+                                    Expanded(
+                                      child: Text(
+                                        '收藏原因：${_favReasons[log.id]}',
+                                        style: const TextStyle(
+                                            fontSize: 11,
+                                            color: Color(0xFF8A6D00)),
+                                      ),
+                                    ),
+                                    const Icon(Icons.edit,
+                                        size: 13,
+                                        color: AppConstants.textSecondary),
+                                  ]),
+                                ),
+                              ],
                               // 商品名称/中文翻译/库存快照（搜索结果记录附带信息）
                               if (log.name != null && log.name!.isNotEmpty) ...[
                                 const SizedBox(height: 4),

@@ -131,6 +131,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
   bool get _dataBusy => _uploadingProductImage || _syncingProductData;
 
+  /// 连续点打印时排队：上一张发完再发下一张，避免并发连接被电脑端丢掉
+  Future<void> _printChain = Future<void>.value();
+
   // 未勾选门店的商品数据（门店名 -> 查到的商品，含“有货但无图”的情况）
   final Map<String, ProductData> _uncheckedStoreProducts = {};
   bool _checkingUncheckedImages = false;
@@ -196,6 +199,22 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         extentOffset: _barcodeController.text.length,
       );
     });
+  }
+
+  /// 英文键盘（密码类型）下有的输入法不给粘贴菜单，这里补一个粘贴按钮
+  Future<void> _pasteIntoBarcode() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = (data?.text ?? '').trim();
+    if (text.isEmpty) return;
+    final cur = _barcodeController.text;
+    final sel = _barcodeController.selection;
+    final start = sel.isValid ? sel.start.clamp(0, cur.length).toInt() : cur.length;
+    final end = sel.isValid ? sel.end.clamp(0, cur.length).toInt() : cur.length;
+    final next = cur.replaceRange(start, end, text);
+    _barcodeController.text = next;
+    _barcodeController.selection = TextSelection.collapsed(
+        offset: (start + text.length).clamp(0, next.length).toInt());
+    if (mounted) setState(() {});
   }
 
   @override
@@ -1273,6 +1292,10 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // 商品信息
+        // 全部门店都没有结果：顶部给醒目提示（区分搜不到 / 网络 / 登录）
+        if (r.stores.values
+            .every((s) => !s.ok || s.data?.name.isEmpty == true))
+          _buildNoResultBanner(r),
         if (firstData != null)
           _buildProductInfo(firstData, r.barcode, firstStoreName),
 
@@ -1435,23 +1458,21 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         ),
         const SizedBox(height: 6),
         Row(children: [
-          if (_hasIp('p1')) Expanded(child: _actionBtn('大价签80', Icons.print, const Color(0xFFFF9800), () => _handleDirectPrint(r, 'p1'))),
+              if (_hasIp('p1')) Expanded(child: _actionBtn('大价签80', Icons.print, const Color(0xFFFF9800), () => _enqueuePrint(r, 'p1'))),
           if (_hasIp('p1') && _hasIp('p2')) const SizedBox(width: 6),
-          if (_hasIp('p2')) Expanded(child: _actionBtn('中价签双列', Icons.print, const Color(0xFF00897B), () => _handleDirectPrint(r, 'p2'))),
+              if (_hasIp('p2')) Expanded(child: _actionBtn('中价签双列', Icons.print, const Color(0xFF00897B), () => _enqueuePrint(r, 'p2'))),
         ]),
         if (_hasIp('p3') || _hasIp('p4')) const SizedBox(height: 6),
         Row(children: [
-          if (_hasIp('p3')) Expanded(child: _actionBtn('中价签单列', Icons.print, const Color(0xFF00897B), () => _handleDirectPrint(r, 'p3'))),
+              if (_hasIp('p3')) Expanded(child: _actionBtn('中价签单列', Icons.print, const Color(0xFF00897B), () => _enqueuePrint(r, 'p3'))),
           if (_hasIp('p3') && _hasIp('p4')) const SizedBox(width: 6),
-          if (_hasIp('p4')) Expanded(child: _actionBtn('小价签', Icons.print, Colors.grey, () => _handleDirectPrint(r, 'p4'))),
+              if (_hasIp('p4')) Expanded(child: _actionBtn('小价签', Icons.print, Colors.grey, () => _enqueuePrint(r, 'p4'))),
         ]),
         // 调试面板
         if (firstData?.rawKeys != null)
           _buildDebugPanel(firstData!),
 
         // 全部未找到提示
-        if (r.stores.values.every((s) => !s.ok || s.data?.name.isEmpty == true))
-          _buildNotFoundHint(),
 
         const SizedBox(height: 16),
       ],
@@ -2432,7 +2453,10 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     // 按 条码+名称 去重，收集所有门店返回的候选商品，并记录每个门店各自的库存，
     // 避免并发查询返回顺序不固定导致库存互相覆盖
     final unique = <String, _CandidateChoice>{};
-    for (final e in r.stores.entries) {
+    // 固定按首页门店顺序（store1/store2…），不跟并发返回先后走
+    final orderedStores = r.stores.entries.toList()
+      ..sort((a, b) => _storeKeyOrder(a.key).compareTo(_storeKeyOrder(b.key)));
+    for (final e in orderedStores) {
       final s = e.value;
       if (!s.ok || s.data == null) continue;
       final cs = s.data!.candidates ?? <ProductData>[s.data!];
@@ -2510,29 +2534,68 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     });
   }
 
-  Widget _buildNotFoundHint() {
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: Card(
-        color: AppConstants.warningColor.withValues(alpha: 0.08),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            children: [
-              const Icon(Icons.info_outline, color: AppConstants.textSecondary, size: 18),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text(
-                  '未找到该条码商品，或当前工号无商品查看权限',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: AppConstants.textSecondary,
-                  ),
-                ),
-              ),
-            ],
+  /// 全部门店都没结果时的醒目提示：搜不到 / 网络错误 / 登录失效分开提示
+  Widget _buildNoResultBanner(MultiStoreResult r) {
+    final errors = r.stores.values
+        .where((s) => !s.ok || s.data == null || s.data!.name.isEmpty)
+        .map((s) => (s.error ?? '').toLowerCase())
+        .toList();
+    bool hasAny(List<String> keys) =>
+        errors.any((e) => keys.any((k) => e.contains(k)));
+    final isNetwork = hasAny([
+      'socket', '连接', '超时', 'timeout', 'network', 'failed host lookup',
+      'connection', 'http 5', 'http 502', 'http 503', 'http 504',
+    ]);
+    final isLogin = hasAny(['登录', 'cookie', '401', '302']);
+
+    final String title;
+    final String sub;
+    final Color color;
+    if (isNetwork) {
+      title = '网络错误：搜索失败';
+      sub = '连不上银豹服务器，请检查手机网络，或确认门店/服务器能正常访问。\n条码：${r.barcode}';
+      color = AppConstants.errorColor;
+    } else if (isLogin) {
+      title = '登录已失效';
+      sub = '门店登录过期，请到配置页重新登录后再搜索。\n条码：${r.barcode}';
+      color = AppConstants.warningColor;
+    } else {
+      title = '搜索不到该商品';
+      sub = '条码：${r.barcode}\n请确认条码/商品名称是否正确，或该门店没有这个商品。';
+      color = const Color(0xFFE65100);
+    }
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(AppConstants.radiusMd),
+        border: Border.all(color: color, width: 1.5),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(isNetwork || isLogin ? Icons.wifi_off : Icons.search_off,
+              color: color, size: 26),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title,
+                    style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: color)),
+                const SizedBox(height: 4),
+                Text(sub,
+                    style: TextStyle(fontSize: 12, color: color)),
+              ],
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -2602,6 +2665,16 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
             padding: const EdgeInsets.symmetric(horizontal: 10)),
       ),
     );
+  }
+
+  void _enqueuePrint(MultiStoreResult r, String printerId) {
+    _printChain = _printChain
+        .then((_) async {
+          await _handleDirectPrint(r, printerId);
+          // 给电脑端打印服务一点收尾时间，再发下一张
+          await Future<void>.delayed(const Duration(milliseconds: 250));
+        })
+        .catchError((_) {});
   }
 
   Future<void> _handleDirectPrint(MultiStoreResult r, String printerId) async {
@@ -2758,9 +2831,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                       controller: _barcodeController,
                       focusNode: _barcodeFocus,
                       enabled: !_dataBusy,
-                      // 默认数字键盘；切换后走「英文键盘」（密码变体，输入法不会弹中文）
+                      // 默认数字键盘；切换后走普通英文键盘（邮箱变体，不走安全键盘、能复制粘贴）
                       keyboardType: _barcodeLetters
-                          ? TextInputType.visiblePassword
+                          ? TextInputType.emailAddress
                           : AppConstants.numberKeyboard(),
                       enableSuggestions: false,
                       autocorrect: false,
@@ -2779,6 +2852,19 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                         suffixIcon: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            if (_barcodeLetters)
+                              IconButton(
+                                onPressed:
+                                    _dataBusy ? null : _pasteIntoBarcode,
+                                tooltip: '粘贴',
+                                padding: EdgeInsets.zero,
+                                visualDensity: VisualDensity.compact,
+                                constraints: const BoxConstraints(
+                                    minWidth: 34, minHeight: 34),
+                                icon: const Icon(Icons.content_paste,
+                                    size: 20,
+                                    color: AppConstants.textSecondary),
+                              ),
                             IconButton(
                               onPressed: _dataBusy
                                   ? null
@@ -3857,6 +3943,13 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         ],
       ),
     );
+    // 打开编辑框就全选当前金额，直接输入就能覆盖
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      controller.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: controller.text.length,
+      );
+    });
   }
 
   /// 把新售价/进价同步到银豹，并更新本地所有门店卡片显示。
@@ -4466,6 +4559,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
           title: const Text('扩展条码', style: TextStyle(fontSize: 16)),
+          // 宽度铺满屏幕：条码数字长，默认宽度看不全
+          insetPadding: const EdgeInsets.symmetric(vertical: 24),
+          contentPadding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -5005,10 +5101,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
 
     setState(() => _querying = true);
 
-    // 门店模式（各门店为独立账号，可能不属于同一总部）：不能用总部货流调单，
-    // 改为「来源店库存 -qty、目标店库存 +qty」两步直改各自门店库存。
-    await ModeService.instance.ensureLoaded();
-    if (ModeService.instance.isStoreMode) {
+    // 调货一律走「来源店库存 -qty、目标店库存 +qty」两步直改各自门店库存，
+    // 不再走银豹货流调出单（总店模式也一样）
+    {
       final srcData = sourceResult.data;
       final tgtData = targetResult.data;
       if (srcData == null || tgtData == null ||
@@ -5023,15 +5118,6 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       final tgtStock = tgtData.stock!;
       final newSrcStock = srcStock - qty;
       final newTgtStock = tgtStock + qty;
-      if (newSrcStock < 0) {
-        if (mounted) {
-          setState(() => _querying = false);
-          _showBanner(
-              '库存不足：${sourceResult.storeName} 当前仅 ${_formatStockStr(srcStock)} 件',
-              isError: true);
-        }
-        return;
-      }
 
       // 先减来源店，成功后再加目标店；目标店失败时回滚来源店，避免两边不一致
       final srcErr = await widget.queryService.updateProductStock(
@@ -5103,7 +5189,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                 targetConfig, tgtData.uid?.toString(), targetResult.storeName),
           ]);
           if (noteErrors.isNotEmpty) {
-            final detail = '操作：门店模式调货（记录要写到调出店、调入店两家）\n'
+            final detail = '操作：调货（记录要写到调出店、调入店两家）\n'
                 '条码：$barcode\n'
                 '调货：${sourceResult.storeName} → ${targetResult.storeName}，$qty 件\n'
                 '操作员：$opName\n'
@@ -5128,40 +5214,6 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
         }
       }
       return;
-    }
-
-    // 总部模式（总账号可切店）：银豹调货走货流调出单（数量加减、生成货单号）
-    final transferErr = await widget.queryService.transferStock(
-      sourceConfig,
-      targetConfig,
-      barcode,
-      qty,
-    );
-
-    if (mounted) {
-      setState(() => _querying = false);
-
-      if (transferErr == null) {
-        _cancelTransfer();
-        _showBanner('调货成功: ${sourceResult.storeName} → ${targetResult.storeName} ($qty件)');
-        OperationLogService.add(
-          store: '${sourceResult.storeName} → ${targetResult.storeName}',
-          action: '调货',
-          barcode: barcode,
-          detail: '调出 $qty 件',
-        );
-        // 总部模式调货走货流单据，商品描述不再写调货记录
-        _query(barcode);
-      } else {
-        // 调货失败 → 弹窗 + 可分享
-        _showTransferFailDialog(
-          barcode: barcode,
-          sourceName: sourceResult.storeName,
-          targetName: targetResult.storeName,
-          qty: qty,
-          error: transferErr,
-        );
-      }
     }
   }
 
@@ -5240,6 +5292,17 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   // ==================== 错误卡片 ====================
 
   Widget _buildErrorCard(String error) {
+    final e = error.toLowerCase();
+    final isNetwork = e.contains('socket') ||
+        e.contains('连接') ||
+        e.contains('timeout') ||
+        e.contains('超时') ||
+        e.contains('network') ||
+        e.contains('failed host lookup') ||
+        e.contains('connection');
+    final shown = isNetwork
+        ? '网络错误：连接不上服务器，请检查手机网络或门店服务器。\n原始错误：$error'
+        : error;
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Card(
@@ -5253,7 +5316,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  error,
+                  shown,
                   style: const TextStyle(
                     color: AppConstants.errorColor,
                     fontSize: 13,
@@ -5565,7 +5628,7 @@ class _CandidateChoice {
 }
 
 /// 多条匹配商品选择弹窗
-class _CandidatePickerDialog extends StatelessWidget {
+class _CandidatePickerDialog extends StatefulWidget {
   final String title;
   final List<_CandidateChoice> entries;
   final Map<String, String> storeNames;
@@ -5577,96 +5640,284 @@ class _CandidatePickerDialog extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: Text(title, style: const TextStyle(fontSize: 16)),
-      contentPadding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-      content: ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 420),
-        child: ListView.builder(
-          shrinkWrap: true,
-          itemCount: entries.length,
-          itemBuilder: (ctx, i) {
-            final entry = entries[i];
-            final p = entry.product;
-            final spec = p.specification.isNotEmpty ? p.specification : '—';
-            // 每个门店自己的库存，单独标注，避免只显示某一个门店的数据
-            final stockParts = entry.storeStocks.entries.map((e) {
-              final storeLabel = storeNames[e.key] ??
-                  entry.storeNamesOfMatch[e.key] ??
-                  e.key;
-              final v = e.value;
-              final stockStr = v != null ? _fmtStockNum(v) : '—';
-              return '$storeLabel: $stockStr';
-            }).toList();
-            final stockText =
-                stockParts.isEmpty ? '' : '库存：${stockParts.join('  ')}';
-            // 多结果选择时展示价格，方便区分不同商品
-            final priceParts = <String>[
-              if (p.sellPrice != null) '售价 R${p.sellPrice!.toStringAsFixed(2)}',
-            ];
-            final priceText = priceParts.isEmpty
-                ? ''
-                : '价格：${priceParts.join('    ')}';
-            final showThumb = _CandidatePickerDialog._hasImage(p);
-            return ListTile(
-              dense: true,
-              leading: SizedBox(
-                width: 44,
-                height: 44,
-                child: showThumb
-                    ? _CachedImage(
-                        url: p.imageUrl!,
-                        width: 44,
-                        height: 44,
-                        decodeWidth: 88,
-                        decodeHeight: 88,
-                        radius: 6,
-                      )
-                    : const Icon(Icons.inventory_2_outlined,
-                        color: AppConstants.primaryColor, size: 32),
-              ),
-              title: Text(
-                p.name,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-              ),
-              subtitle: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    [
-                      '条码：${p.barcode}',
-                      if (spec != '—') '规格：$spec',
-                    ].join('  '),
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                  if (priceText.isNotEmpty)
-                    Text(
-                      priceText,
-                      style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.red),
-                    ),
-                  if (stockText.isNotEmpty)
-                    Text(stockText, style: const TextStyle(fontSize: 12)),
-                ],
-              ),
-              trailing: const Icon(Icons.chevron_right, size: 20),
-              onTap: () => Navigator.pop(ctx, entry),
-            );
-          },
+  State<_CandidatePickerDialog> createState() =>
+      _CandidatePickerDialogState();
+}
+
+enum _CandidateSortField { none, price, stock, time }
+
+class _CandidatePickerDialogState extends State<_CandidatePickerDialog> {
+  _CandidateSortField _sortField = _CandidateSortField.none;
+  bool _sortDesc = true;
+  /// 当前正在放大的图片 URL（null = 正常列表）
+  String? _previewUrl;
+
+  /// 升/降比较（空值永远排最后）
+  int _cmp(double? a, double? b) {
+    if (a == null && b == null) return 0;
+    if (a == null) return 1;
+    if (b == null) return -1;
+    final r = a.compareTo(b);
+    return _sortDesc ? -r : r;
+  }
+
+  double? _totalStock(_CandidateChoice e) {
+    var sum = 0.0;
+    var any = false;
+    for (final v in e.storeStocks.values) {
+      if (v != null) {
+        sum += v;
+        any = true;
+      }
+    }
+    return any ? sum : null;
+  }
+
+  DateTime? _createdAt(ProductData p) {
+    final raw = p.createDate.trim();
+    if (raw.isEmpty) return null;
+    return DateTime.tryParse(raw.replaceAll('.', '-').replaceAll('/', '-'));
+  }
+
+  List<_CandidateChoice> get _sorted {
+    final list = [...widget.entries];
+    if (_sortField == _CandidateSortField.price) {
+      list.sort((a, b) => _cmp(a.product.sellPrice, b.product.sellPrice));
+    } else if (_sortField == _CandidateSortField.stock) {
+      list.sort((a, b) => _cmp(_totalStock(a), _totalStock(b)));
+    } else if (_sortField == _CandidateSortField.time) {
+      list.sort((a, b) {
+        final x = _createdAt(a.product);
+        final y = _createdAt(b.product);
+        if (x == null && y == null) return 0;
+        if (x == null) return 1;
+        if (y == null) return -1;
+        final r = x.compareTo(y);
+        return _sortDesc ? -r : r;
+      });
+    }
+    return list;
+  }
+
+  Widget _sortChip(String label, _CandidateSortField field) {
+    final active = _sortField == field;
+    final text = (field == _CandidateSortField.none)
+        ? label
+        : (active ? '$label${_sortDesc ? '↓' : '↑'}' : label);
+    return ChoiceChip(
+      label: Text(text, style: const TextStyle(fontSize: 12)),
+      selected: active,
+      visualDensity: VisualDensity.compact,
+      onSelected: (_) {
+        setState(() {
+          if (field == _CandidateSortField.none) {
+            _sortField = _CandidateSortField.none;
+            _sortDesc = true;
+          } else if (_sortField != field) {
+            // 第一次点某个字段 = 降序
+            _sortField = field;
+            _sortDesc = true;
+          } else {
+            // 再点同一个按钮 = 升序/降序来回切
+            _sortDesc = !_sortDesc;
+          }
+        });
+      },
+    );
+  }
+  /// 一行内容（多结果列表用）
+  Widget _kvLine(String text,
+      {Color? color, bool bold = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 1),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 12,
+          color: color,
+          fontWeight: bold ? FontWeight.w600 : FontWeight.normal,
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('取消'),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = _sorted;
+    final size = MediaQuery.sizeOf(context);
+    return Dialog(
+      // 贴底显示：宽度铺满，高度从下往上占屏幕 2/3
+      alignment: Alignment.bottomCenter,
+      insetPadding: EdgeInsets.zero,
+      backgroundColor: Colors.transparent,
+      child: Container(
+        width: size.width,
+        height: size.height * 2 / 3,
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
         ),
-      ],
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 8, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(widget.title,
+                        style: const TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w600)),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.pop(context),
+                    tooltip: '关闭',
+                    icon: const Icon(Icons.close, size: 20),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  _sortChip('默认', _CandidateSortField.none),
+                  _sortChip('售价', _CandidateSortField.price),
+                  _sortChip('库存', _CandidateSortField.stock),
+                  _sortChip('时间', _CandidateSortField.time),
+                ],
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Divider(height: 1),
+            Expanded(
+              child: ListView.separated(
+                itemCount: entries.length,
+                separatorBuilder: (_, __) =>
+                    const Divider(height: 1, indent: 12, endIndent: 12),
+                itemBuilder: (ctx, i) {
+                  final entry = entries[i];
+                  final p = entry.product;
+                  final stockParts = entry.storeStocks.entries.map((e) {
+                    final storeLabel = widget.storeNames[e.key] ??
+                        entry.storeNamesOfMatch[e.key] ??
+                        e.key;
+                    final v = e.value;
+                    final stockStr = v != null ? _fmtStockNum(v) : '—';
+                    return '$storeLabel: $stockStr';
+                  }).toList();
+                  final stockText =
+                      stockParts.isEmpty ? '' : '库存：${stockParts.join('  ')}';
+                  final showThumb = _hasImage(p);
+                  return InkWell(
+                    onTap: () => Navigator.pop(ctx, entry),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 10),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // 点图片先放大，点文字区域才选中
+                          GestureDetector(
+                            onTap: showThumb
+                                ? () => setState(() => _previewUrl = p.imageUrl!)
+                                : null,
+                            child: SizedBox(
+                              width: 56,
+                              height: 56,
+                              child: showThumb
+                                  ? _CachedImage(
+                                      url: p.imageUrl!,
+                                      width: 56,
+                                      height: 56,
+                                      decodeWidth: 112,
+                                      decodeHeight: 112,
+                                      radius: 6,
+                                    )
+                                  : const Icon(Icons.inventory_2_outlined,
+                                      color: AppConstants.primaryColor,
+                                      size: 34),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  p.name,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600),
+                                ),
+                                const SizedBox(height: 2),
+                                _kvLine('条码：${p.barcode}'),
+                                if (p.supplier.trim().isNotEmpty)
+                                  _kvLine('供货商：${p.supplier}'),
+                                if (p.unit.trim().isNotEmpty && p.unit != '—')
+                                  _kvLine('单位：${p.unit}'),
+                                if (p.sellPrice != null)
+                                  _kvLine(
+                                    '售价：R${p.sellPrice!.toStringAsFixed(2)}',
+                                    color: Colors.red,
+                                    bold: true,
+                                  ),
+                                if (stockText.isNotEmpty) _kvLine(stockText),
+                                if (p.createDate.trim().isNotEmpty)
+                                  _kvLine(
+                                    '创建：${p.createDate}',
+                                    color: AppConstants.textSecondary,
+                                  ),
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right, size: 20),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+              ),
+            ),
+            // 放大图盖在同一弹窗内，不会被其他页面遮挡
+            if (_previewUrl != null)
+              Positioned.fill(
+                child: GestureDetector(
+                  onTap: () => setState(() => _previewUrl = null),
+                  child: ClipRRect(
+                    borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(16)),
+                    child: ColoredBox(
+                      color: Colors.white,
+                      child: InteractiveViewer(
+                        minScale: 1,
+                        maxScale: 5,
+                        child: _CachedImage(
+                          url: _previewUrl!,
+                          width: size.width,
+                          height: size.height * 2 / 3,
+                          fit: BoxFit.cover,
+                          radius: 0,
+                          decodeWidth: 1600,
+                          decodeHeight: 1600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 

@@ -139,96 +139,124 @@ class QueryService {
 
       // Step 3: 调用 LoadProductsByPage 搜索条码
       final referer = '$baseUrl/Product/Manage';
-      final pageData = _encodeForm({
-        'userId': userId,
-        'enable': '1',
-        'productTagUidsJson': '[]',
-        'keyword': code,
-        'groupBySpu': 'false',
-        'categorysJson': '[]',
-        'supplierUid': '',
-        'categoryType': '',
-        'pageIndex': '1',
-        'pageSize': '20',
-        'orderColumn': '',
-        'asc': 'true',
-      });
-
+      // 银豹这个接口一页最多 20 条（pageSize=20）。以前只取第 1 页，所以
+      // 匹配超过 20 个商品时永远只看到 20 个。这里逐页拉，直到不满一页为止。
       final uri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
-      final request = await _httpClient.postUrl(uri);
-      request.headers.set('User-Agent', _ua);
-      request.headers.set('Accept', 'application/json, text/javascript, */*');
-      request.headers.set('Referer', referer);
-      request.headers.set('Origin', baseUrl);
-      request.headers.set('X-Requested-With', 'XMLHttpRequest');
-      request.headers.set('Content-Type',
-          'application/x-www-form-urlencoded; charset=UTF-8');
-      request.headers.set('Cookie', cookie);
-      request.followRedirects = false;
 
-      request.write(pageData);
+      Future<(int, String, String)> loadPage(int pageIndex) async {
+        final pageData = _encodeForm({
+          'userId': userId,
+          'enable': '1',
+          'productTagUidsJson': '[]',
+          'keyword': code,
+          'groupBySpu': 'false',
+          'categorysJson': '[]',
+          'supplierUid': '',
+          'categoryType': '',
+          'pageIndex': '$pageIndex',
+          'pageSize': '20',
+          'orderColumn': '',
+          'asc': 'true',
+        });
+        final request = await _httpClient.postUrl(uri);
+        request.headers.set('User-Agent', _ua);
+        request.headers.set('Accept', 'application/json, text/javascript, */*');
+        request.headers.set('Referer', referer);
+        request.headers.set('Origin', baseUrl);
+        request.headers.set('X-Requested-With', 'XMLHttpRequest');
+        request.headers.set('Content-Type',
+            'application/x-www-form-urlencoded; charset=UTF-8');
+        request.headers.set('Cookie', cookie);
+        request.followRedirects = false;
+        request.write(pageData);
+        final response =
+            await request.close().timeout(const Duration(seconds: 15));
+        final body = await _readBody(response);
+        return (
+          response.statusCode,
+          body,
+          response.headers.value('location') ?? '',
+        );
+      }
 
-      final response = await request.close().timeout(const Duration(seconds: 15));
-      final statusCode = response.statusCode;
-      final body = await _readBody(response);
-      timer?.record('POST搜索', detail: 'HTTP $statusCode, 响应${body.length}字节');
+      const pageSize = 20;
+      final products = <Map<String, dynamic>>[];
+      final seen = <String>{};
+      var pageIndex = 1;
+      while (true) {
+        final (statusCode, body, location) = await loadPage(pageIndex);
+        timer?.record('POST搜索',
+            detail: '第$pageIndex页 HTTP $statusCode, 响应${body.length}字节');
 
-      // 检查是否登录失效
-      if (statusCode == 302 || statusCode == 301) {
-        final location = response.headers.value('location') ?? '';
-        if (RegExp(r'signin|login', caseSensitive: false).hasMatch(location)) {
-          timer?.record('会话检查', detail: 'cookie过期需重登');
-          // 清除过期 cookie 和 userId 缓存
-          await _sessionManager.deleteCookie(store.storeKey);
+        // 检查是否登录失效
+        if (statusCode == 302 || statusCode == 301) {
+          if (RegExp(r'signin|login', caseSensitive: false)
+              .hasMatch(location)) {
+            timer?.record('会话检查', detail: 'cookie过期需重登');
+            await _sessionManager.deleteCookie(store.storeKey);
+            return ProductResult(
+              ok: false,
+              error: '${store.name} 登录已失效，请重新登录',
+            );
+          }
+        }
+
+        if (statusCode != 200) {
+          timer?.record('HTTP状态', detail: '非200: $statusCode');
           return ProductResult(
             ok: false,
-            error: '${store.name} 登录已失效，请重新登录',
+            error: '${store.name} 查询失败 (HTTP $statusCode)',
           );
         }
-      }
 
-      if (statusCode != 200) {
-        timer?.record('HTTP状态', detail: '非200: $statusCode');
-        return ProductResult(
-          ok: false,
-          error: '${store.name} 查询失败 (HTTP $statusCode)',
-        );
-      }
+        Map<String, dynamic> data;
+        try {
+          data = jsonDecode(body) as Map<String, dynamic>;
+        } catch (_) {
+          timer?.record('JSON解析', detail: '格式异常');
+          return ProductResult(
+            ok: false,
+            error: '${store.name} 查询返回格式异常',
+          );
+        }
 
-      // 解析 JSON 响应
-      Map<String, dynamic> data;
-      try {
-        data = jsonDecode(body) as Map<String, dynamic>;
-      } catch (_) {
-        timer?.record('JSON解析', detail: '格式异常');
-        return ProductResult(
-          ok: false,
-          error: '${store.name} 查询返回格式异常',
-        );
-      }
+        if (data['successed'] != true) {
+          timer?.record('查询结果', detail: 'successed!=true');
+          return ProductResult(
+            ok: false,
+            error: '${store.name} 查询失败',
+          );
+        }
 
-      if (data['successed'] != true) {
-        timer?.record('查询结果', detail: 'successed!=true');
-        return ProductResult(
-          ok: false,
-          error: '${store.name} 查询失败',
-        );
-      }
+        final contentView = data['contentView'] as String? ?? '';
+        final pageProducts = contentView.isEmpty
+            ? <Map<String, dynamic>>[]
+            : _parseProductTable(contentView);
+        timer?.record('HTML解析',
+            detail: '第$pageIndex页 ${contentView.length}字节→${pageProducts.length}条商品');
 
-      // 从 HTML 表格中解析商品数据
-      final contentView = data['contentView'] as String? ?? '';
-      if (contentView.isEmpty) {
-        timer?.record('HTML解析', detail: 'contentView为空');
-        return ProductResult(
-          ok: false,
-          error: '未找到该条码商品',
-        );
-      }
+        var added = 0;
+        for (final p in pageProducts) {
+          final key = '${p['uid'] ?? ''}\u0000${p['productId'] ?? ''}'
+              '\u0000${p['barcode'] ?? ''}\u0000${p['name'] ?? ''}'
+              '\u0000${p['specification'] ?? ''}';
+          if (seen.add(key)) {
+            products.add(p);
+            added++;
+          }
+        }
 
-      final products = _parseProductTable(contentView);
-      timer?.record('HTML解析', detail: '${contentView.length}字节→${products.length}条商品');
+        // 不满一页 = 没有下一页
+        if (pageProducts.length < pageSize) break;
+        // 服务器忽略 pageIndex 时会一直返回第一页：没有新商品就停，防死循环
+        if (added == 0) break;
+        // 最多 25 页（500 条），够用且不会把查询拖死
+        if (pageIndex >= 25) break;
+        pageIndex++;
+      }
 
       if (products.isEmpty) {
+        timer?.record('HTML解析', detail: '没有商品');
         return ProductResult(
           ok: false,
           error: '未找到该条码商品',

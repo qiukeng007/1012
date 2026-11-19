@@ -152,6 +152,8 @@ class OperationLogService {
   static const _favIdKey = 'favorite_log_ids';
   /// 旧版按条码收藏的键（首次读取时迁移成对应最新一条记录的 id）
   static const _legacyFavBarcodeKey = 'favorite_log_barcodes';
+  /// 收藏原因（记录 id → 原因）
+  static const _favReasonKey = 'favorite_log_reasons';
 
   /// 当前收藏的记录 id 集合（会自动把旧的按条码收藏迁移成记录 id）
   static Future<Set<String>> getFavoriteIds() async {
@@ -181,10 +183,50 @@ class OperationLogService {
     final list = (prefs.getStringList(_favIdKey) ?? const []).toList();
     if (list.contains(id)) {
       list.remove(id);
+      final reasons = await getFavoriteReasons();
+      if (reasons.remove(id) != null) await _saveFavoriteReasons(reasons);
     } else {
       list.insert(0, id);
     }
     await prefs.setStringList(_favIdKey, list);
+    return list.toSet();
+  }
+
+  /// 收藏原因（记录 id → 原因）
+  static Future<Map<String, String>> getFavoriteReasons() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_favReasonKey) ?? '';
+    if (raw.isEmpty) return <String, String>{};
+    try {
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      return m.map((k, v) => MapEntry(k, v?.toString() ?? ''));
+    } catch (_) {
+      return <String, String>{};
+    }
+  }
+
+  static Future<void> _saveFavoriteReasons(
+      Map<String, String> reasons) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_favReasonKey, jsonEncode(reasons));
+  }
+
+  /// 收藏并保存原因（已收藏就只改原因；原因为空 = 只收藏不写原因）
+  static Future<Set<String>> setFavoriteReason(
+      String id, String reason) async {
+    if (id.isEmpty) return <String>{};
+    final prefs = await SharedPreferences.getInstance();
+    final list = (prefs.getStringList(_favIdKey) ?? const []).toList();
+    if (!list.contains(id)) list.insert(0, id);
+    await prefs.setStringList(_favIdKey, list);
+    final reasons = await getFavoriteReasons();
+    final r = reason.trim();
+    if (r.isEmpty) {
+      reasons.remove(id);
+    } else {
+      reasons[id] = r;
+    }
+    await _saveFavoriteReasons(reasons);
     return list.toSet();
   }
 }

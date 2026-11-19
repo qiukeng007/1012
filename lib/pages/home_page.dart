@@ -692,39 +692,32 @@ class _HomePageState extends State<HomePage>
   Future<void> _checkAppUpdate(String serverUrl) async {
     final update = UpdateService();
     final newVer = await update.checkUpdate(serverUrl);
-    if (!mounted || newVer == 0) return;
-
-    // 同版本已经提示过就不再弹
-    final prefs = await SharedPreferences.getInstance();
-    final shownVer = prefs.getInt('sys_update_shown_ver') ?? 0;
-    if (newVer <= shownVer) return;
-
-    // 先记录已提示，防止循环弹窗
-    await prefs.setInt('sys_update_shown_ver', newVer);
-
-    if (!mounted) return;
-
-    final currentVer = await update.currentVersion;
+    if (!mounted || newVer.isEmpty) return;
+    final currentInternal = await update.currentInternalVersion;
     final versionName = await update.versionName;
     if (!mounted) return;
 
+    // 有新版本就强制停在提示框：不提供下载链接，也不能继续使用旧版
     await showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('发现新版本'),
-        content: Text(
-            '当前版本 $versionName (build $currentVer)\n新版本 build $newVer，请下载更新',
-            style: const TextStyle(fontSize: 14)),
-        actions: [
-          TextButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await update.openDownloadPage(serverUrl);
-            },
-            child: const Text('立即更新'),
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('需要更新版本'),
+          content: Text(
+            '当前版本 $versionName（内部版本 $currentInternal）\n'
+            '服务器最新版本 $newVer。\n\n'
+            '旧版本已停止使用，请联系作者获取新版本后再打开。',
+            style: const TextStyle(fontSize: 14),
           ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () => SystemNavigator.pop(),
+              child: const Text('退出'),
+            ),
+          ],
+        ),
       ),
     );
   }
