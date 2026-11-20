@@ -1,0 +1,78 @@
+name: iOS Shorebird
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "release = 出完整包，patch = 发补丁"
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - patch
+      release_version:
+        description: "patch 时的版本（如 1.0.24+57），release 留空"
+        required: false
+        default: ""
+      track:
+        description: "patch 的 track"
+        required: false
+        default: stable
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shorebirdtech/setup-shorebird@v1
+        with:
+          cache: true
+
+      - name: Read app version
+        id: appver
+        run: echo "version=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d+ -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Shorebird release iOS (unsigned)
+        if: ${{ github.event.inputs.mode == 'release' }}
+        env:
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+        run: |
+          set -o pipefail
+          shorebird release ios --no-codesign --flutter-version=3.41.2 2>&1 | tee build_ios.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-shorebird-build-log
+          path: build_ios.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Package unsigned IPA
+        if: ${{ github.event.inputs.mode == 'release' }}
+        run: |
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -r -y "cash-carry-v${{ steps.appver.outputs.version }}-ios-shorebird-unsigned.ipa" Payload/
+          ls -la "cash-carry-v${{ steps.appver.outputs.version }}-ios-shorebird-unsigned.ipa"
+
+      - name: Upload IPA
+        if: ${{ github.event.inputs.mode == 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cash-carry-v${{ steps.appver.outputs.version }}-ios-shorebird-unsigned
+          path: cash-carry-v${{ steps.appver.outputs.version }}-ios-shorebird-unsigned.ipa
+          retention-days: 7
+
+      - name: Shorebird patch iOS (unsigned)
+        if: ${{ github.event.inputs.mode == 'patch' }}
+        env:
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+        run: |
+          shorebird patch ios --no-codesign \
+            --release-version "${{ github.event.inputs.release_version }}" \
+            --track "${{ github.event.inputs.track }}"

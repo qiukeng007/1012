@@ -12,10 +12,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/services.dart';
+import 'package:shorebird_code_push/shorebird_code_push.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/auth_service.dart';
 import '../services/update_service.dart';
+import '../services/user_status_service.dart';
 import '../services/foreground_service.dart';
 import '../services/keepalive_logger.dart';
 import '../services/notify_service.dart';
@@ -58,6 +60,10 @@ class _HomePageState extends State<HomePage>
   final ValueNotifier<int> _tabIndex = ValueNotifier<int>(0);
   /// 配置页是否正在显示：单独一个 notifier，切别的页签不会白重建配置页
   final ValueNotifier<bool> _settingsVisible = ValueNotifier<bool>(false);
+  /// 用户停用校验（避免重复弹窗/重复请求）
+  bool _userBlockedDialogOpen = false;
+  DateTime _lastUserStatusCheck = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastUserStatusKey = '';
   final PageController _pageController = PageController();
 
   /// 通知页（抓通知 + 语音播报）只有安卓有：iOS 系统不允许第三方 App 读通知栏，也不支持播报
@@ -137,6 +143,10 @@ class _HomePageState extends State<HomePage>
     // 保活服务一直挂着（前台也挂）—— 状态栏常驻「保持在线」图标，
     // 语音引擎和通知监听也不会被系统冻掉
     unawaited(ForegroundService.start());
+    // Shorebird 补丁：发现新补丁先弹提示，再后台下载（重启后生效）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_checkShorebirdPatch());
+    });
   }
 
   @override
@@ -195,6 +205,11 @@ class _HomePageState extends State<HomePage>
         // 以前只有「启动 App」或「再提交照片」才会启动，
         // 一旦被系统中断过，任务会一直卡在「处理中」等到下一次提交。
         unawaited(PhotoQueueService.instance.start());
+        // 回到前台再确认一次操作员有没有被后台停用
+        unawaited(_checkUserStatus(
+          _restockService?.serverUrl ?? '',
+          _restockService?.operatorName ?? '',
+        ));
         break;
       default:
         break;
@@ -230,6 +245,11 @@ class _HomePageState extends State<HomePage>
             _printerConfigs = printers;
           });
         // 门店勾选变化后，右上角图片数量跟着换成对应门店的记录
+        // 操作员/服务器改了也重新确认停用状态
+        unawaited(_checkUserStatus(
+          restockConfig.serverUrl,
+          restockConfig.operatorName,
+        ));
         await _loadCachedImageCount();
         if (_imageCount == null) unawaited(_refreshImageCount());
       } catch (_) {}
@@ -294,6 +314,8 @@ class _HomePageState extends State<HomePage>
           _verifyAndAutoLogin(configs);
           _checkAppUpdate(svrUrl);
         }
+        // 操作员是否被后台停用（没配置操作员/服务器时跳过）
+        unawaited(_checkUserStatus(svrUrl, effectiveConfig.operatorName));
         // 启动定时检查（仅补货服务器在线状态，不做登录状态定时验证）
         _startServerCheck();
         // 冷启动补一条“使用”记录：登录后 / 后台清掉重开都可见（登录成功另有专门记录）
@@ -720,6 +742,68 @@ class _HomePageState extends State<HomePage>
         ),
       ),
     );
+  }
+
+  /// 检查操作员是否被后台停用：服务器 PIC/user_status.txt
+  /// 被停用就弹不可关闭的提示（只能退出），防止继续使用。
+  Future<void> _checkUserStatus(String serverUrl, String operator) async {
+    final op = operator.trim();
+    final url = serverUrl.trim();
+    if (op.isEmpty || url.isEmpty || _userBlockedDialogOpen) return;
+
+    // 同一个操作员 30 秒内不重复请求（防止切配置时连续弹）
+    final key = '$url|$op';
+    final now = DateTime.now();
+    if (key == _lastUserStatusKey &&
+        now.difference(_lastUserStatusCheck).inSeconds < 30) {
+      return;
+    }
+    _lastUserStatusKey = key;
+    _lastUserStatusCheck = now;
+
+    final st = await UserStatusService.check(url, op);
+    if (!mounted || st.enabled || _userBlockedDialogOpen) return;
+
+    _userBlockedDialogOpen = true;
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('账号已停用'),
+          content: Text(
+            '操作员「$op」已被停用，无法继续使用本 APP。\n'
+            '${st.reason.isNotEmpty ? '原因：${st.reason}\n' : ''}\n'
+            '请联系管理员开通后再使用。',
+            style: const TextStyle(fontSize: 14),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => SystemNavigator.pop(),
+              child: const Text('退出'),
+            ),
+          ],
+        ),
+      ),
+    );
+    _userBlockedDialogOpen = false;
+  }
+  /// 检查 Shorebird 补丁：有更新先弹提示（4 秒自动消失，无按钮），再下载
+  Future<void> _checkShorebirdPatch() async {
+    try {
+      final updater = ShorebirdUpdater();
+      if (!updater.isAvailable) return;
+      final status = await updater.checkForUpdate();
+      if (!mounted || status != UpdateStatus.outdated) return;
+      // 先弹提示；不能 await 下载，否则下载慢会挡住启动
+      unawaited(showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const _PatchUpdateDialog(),
+      ));
+      unawaited(updater.update());
+    } catch (_) {}
   }
 
   void _navigateToRestock(RestockPrefillData data) {
@@ -1551,6 +1635,57 @@ class _BouncingDotsState extends State<_BouncingDots>
           }),
         );
       },
+    );
+  }
+}
+
+/// 补丁更新提示：无按钮，4 秒后自动关闭
+class _PatchUpdateDialog extends StatefulWidget {
+  const _PatchUpdateDialog();
+
+  @override
+  State<_PatchUpdateDialog> createState() => _PatchUpdateDialogState();
+}
+
+class _PatchUpdateDialogState extends State<_PatchUpdateDialog> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(const Duration(seconds: 4), () {
+      if (mounted) Navigator.of(context).pop();
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: Row(
+          children: const [
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                '有新的APP补丁开始自动更新，更新完成后需要重启生效！',
+                style: TextStyle(fontSize: 14),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

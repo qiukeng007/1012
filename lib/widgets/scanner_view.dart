@@ -4,6 +4,7 @@ import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../utils/image_quality.dart';
+import '../services/app_sound_service.dart';
 
 /// 扫码器 — 实时扫码 + 图片导入识别
 
@@ -70,6 +71,7 @@ class _ScannerViewState extends State<ScannerView>
     final value = barcode.rawValue;
     if (value == null || value.isEmpty || value.length < 6) return;
     _hasDetected = true;
+    AppSoundService.instance.playScanBeep();
     widget.onDetect(_cleanBarcode(value));
   }
 
@@ -90,6 +92,7 @@ class _ScannerViewState extends State<ScannerView>
       if (!mounted) return;
       if (value != null) {
         _hasDetected = true;
+        AppSoundService.instance.playScanBeep();
         widget.onDetect(_cleanBarcode(value));
         return;
       }

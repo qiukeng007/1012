@@ -31,6 +31,7 @@ class _ServerTxtManagerPageState extends State<ServerTxtManagerPage> {
     'password.txt',
     'app_version.txt',
     '_app_start.txt',
+    'user_status.txt',
   ];
 
   final _urlCtrl = TextEditingController();

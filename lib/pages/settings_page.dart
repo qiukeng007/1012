@@ -28,6 +28,7 @@ import '../services/advanced_settings_service.dart';
 import 'server_txt_manager_page.dart';
 import 'wechat_login_page.dart';
 import 'notify_card.dart';
+import 'package:shorebird_code_push/shorebird_code_push.dart';
 import '../services/notify_service.dart';
 import '../services/store_sync_service.dart';
 import '../models/printer_config.dart';
@@ -275,15 +276,25 @@ class _SettingsPageState extends State<SettingsPage>
       final profiles = await widget.configService.getProfileNames();
       final active = await widget.configService.getActiveProfileName();
       final info = await PackageInfo.fromPlatform();
+      // 补丁号：安装包版本不会变，但 Shorebird 补丁号每发一次 +1
+      var appVerText = info.version;
+      try {
+        final updater = ShorebirdUpdater();
+        if (updater.isAvailable) {
+          final patch = await updater.readCurrentPatch();
+          if (patch != null) {
+            appVerText = '${info.version}.${patch.number.toString().padLeft(2, '0')}';
+          }
+        }
+      } catch (_) {}
       setState(() {
         _configs = configs;
         _restockConfig = restockConfig;
         _printerConfigs = printers;
         _printerProfiles = profiles;
         _activeProfile = active;
-        // 直接显示版本号（如 1.0.13）：每次打包把最后一段 +1，99 后进位
-        _appVersion =
-            info.version;
+        // 版本号 + Shorebird 补丁号（有补丁时显示）
+        _appVersion = appVerText;
         _loading = false;
       });
       // 同步控制器（并修复历史遗留：全局后台地址被旧逻辑降级成 http://）
@@ -937,12 +948,14 @@ class _SettingsPageState extends State<SettingsPage>
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: _buildRestockConfigCard(),
             ),
+        // 每个门店单独一段，滑到哪建哪（门店多时首屏不卡）
+        ..._configs.asMap().entries.map((e) => () => Padding(
+              padding: EdgeInsets.fromLTRB(16, e.key == 0 ? 16 : 0, 16, 8),
+              child: _buildStoreItem(e.key),
+            )),
         () => Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(children: [
-                ...List.generate(_configs.length, (i) => _buildStoreItem(i)),
-                _buildAddButton(),
-              ]),
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: _buildAddButton(),
             ),
       ] else ...[
         () => Padding(
@@ -954,6 +967,13 @@ class _SettingsPageState extends State<SettingsPage>
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: _buildIdDataCard(),
             ),
+        // 门店行也懒加载：门店多时不会一进配置页就全建出来
+        ..._configs.asMap().entries
+            .where((e) => e.value.storeId.isNotEmpty)
+            .map((e) => () => Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: _buildIdStoreRow(e.value, e.key),
+                )),
         () => Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: _buildRestockConfigCard(),
@@ -1455,18 +1475,20 @@ class _SettingsPageState extends State<SettingsPage>
             const SizedBox(height: 4),
             _buildServerStatus(),
             const SizedBox(height: 8),
-            _buildRestockField(
-              label: _restockConfig.suppliersReadonly
-                  ? '供货商列表（银豹自动获取，只读）'
-                  : '供货商列表（逗号分隔）',
-              ctrl: _suppliersCtrl,
-              hint: '例如：L228,F05,N68',
-              maxLines: 3,
-              readOnly: _restockConfig.suppliersReadonly,
-              onChanged: (v) => _autoSaveRestock(() {
-                _restockConfig = _restockConfig.copyWith(suppliers: v);
-              }),
-            ),
+            // 银豹自动获取的供货商可能有几百上千个：不再用 TextField 渲染
+            // （超长单行文本排版会把配置页卡死），改成只显示数量，点开再看。
+            if (_restockConfig.suppliersReadonly)
+              _buildSuppliersSummary()
+            else
+              _buildRestockField(
+                label: '供货商列表（逗号分隔）',
+                ctrl: _suppliersCtrl,
+                hint: '例如：L228,F05,N68',
+                maxLines: 3,
+                onChanged: (v) => _autoSaveRestock(() {
+                  _restockConfig = _restockConfig.copyWith(suppliers: v);
+                }),
+              ),
             const SizedBox(height: 10),
             // 手动更新供货商（从银豹获取最新列表，仅当已登录时可用）
             SizedBox(
@@ -1477,6 +1499,69 @@ class _SettingsPageState extends State<SettingsPage>
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// 只读供货商列表：只显示数量，避免超长文本卡死；点一下看全部
+  Widget _buildSuppliersSummary() {
+    final list = _supplierNameList();
+    return InkWell(
+      onTap: list.isEmpty ? null : _showSuppliersList,
+      borderRadius: BorderRadius.circular(AppConstants.radiusSm),
+      child: InputDecorator(
+        decoration: InputDecoration(
+          labelText: '供货商列表（银豹自动获取，只读）',
+          isDense: true,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(AppConstants.radiusSm),
+          ),
+        ),
+        child: Row(children: [
+          Expanded(
+            child: Text(
+              list.isEmpty ? '（空）' : '已获取 ${list.length} 个供货商',
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+          const Icon(Icons.list_alt,
+              size: 18, color: AppConstants.primaryColor),
+        ]),
+      ),
+    );
+  }
+
+  List<String> _supplierNameList() => _restockConfig.suppliers
+      .split(',')
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty)
+      .toList();
+
+  Future<void> _showSuppliersList() async {
+    final list = _supplierNameList();
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('供货商列表（${list.length} 个）',
+            style: const TextStyle(fontSize: 16)),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 420,
+          child: ListView.builder(
+            itemCount: list.length,
+            itemBuilder: (_, i) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Text(list[i], style: const TextStyle(fontSize: 13)),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭')),
+        ],
       ),
     );
   }
@@ -1949,56 +2034,6 @@ class _SettingsPageState extends State<SettingsPage>
             ),
           ]),
           const SizedBox(height: 4),
-          ...syncedStores.map((c) {
-            final idx = _configs.indexOf(c);
-            final ctrl = _storeNameCtrls[c.storeId];
-            if (ctrl == null) return const SizedBox.shrink();
-            final label = _storeBadgeOf(c);
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Row(children: [
-                Checkbox(
-                  value: c.enabled,
-                  onChanged: (v) => _toggleStoreEnabled(idx, v ?? true),
-                  visualDensity: VisualDensity.compact,
-                ),
-                Container(
-                  width: 36,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppConstants.primaryColor.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(label,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          color: AppConstants.primaryColor)),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: ctrl,
-                    style: const TextStyle(fontSize: 13),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 8),
-                      border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(6)),
-                    ),
-                    onChanged: (v) => _saveStoreNameField(idx, v),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Text(c.storeId,
-                    style: const TextStyle(
-                        fontSize: 9, color: AppConstants.textSecondary)),
-              ]),
-            );
-          }),
           const Divider(height: 16),
           const Text(
             '勾选需要搜索的门店（如：新店、老店），首页搜索只查询勾选门店的库存',
@@ -2010,6 +2045,68 @@ class _SettingsPageState extends State<SettingsPage>
   }
 
   /// 门店名称徽标（取名称前 2 个字，模仿 smart_eye_stock 的标签徽章）
+  /// 单个门店行（HQ 模式懒加载用）
+  Widget _buildIdStoreRow(StoreConfig c, int idx) {
+    _syncStoreNameCtrls();
+    final ctrl = _storeNameCtrls[c.storeId];
+    if (ctrl == null) return const SizedBox.shrink();
+    final label = _storeBadgeOf(c);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Card(
+        margin: EdgeInsets.zero,
+        elevation: 0,
+        color: AppConstants.bgColor,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppConstants.radiusSm),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Row(children: [
+            Checkbox(
+              value: c.enabled,
+              onChanged: (v) => _toggleStoreEnabled(idx, v ?? true),
+              visualDensity: VisualDensity.compact,
+            ),
+            Container(
+              width: 36,
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              decoration: BoxDecoration(
+                color: AppConstants.primaryColor.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(label,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: AppConstants.primaryColor)),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: ctrl,
+                style: const TextStyle(fontSize: 13),
+                decoration: InputDecoration(
+                  isDense: true,
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(6)),
+                ),
+                onChanged: (v) => _saveStoreNameField(idx, v),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(c.storeId,
+                style: const TextStyle(
+                    fontSize: 9, color: AppConstants.textSecondary)),
+          ]),
+        ),
+      ),
+    );
+  }
+
   String _storeBadgeOf(StoreConfig c) {
     final name = c.name.trim();
     if (name.isEmpty) return '店';
