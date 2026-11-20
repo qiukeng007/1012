@@ -94,7 +94,7 @@ class _TapFeedbackScopeState extends State<TapFeedbackScope> {
         // 滑动 / 长按不算点击
         if (moved > 12 || ms > 400) return;
         final now = DateTime.now();
-        if (now.difference(_last).inMilliseconds < 60) return;
+        if (now.difference(_last).inMilliseconds < 80) return;
         _last = now;
         Feedback.forTap(context);
         if (defaultTargetPlatform == TargetPlatform.android) {
