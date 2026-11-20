@@ -55,10 +55,24 @@ jobs:
       - name: Package unsigned IPA
         if: ${{ github.event.inputs.mode == 'release' }}
         run: |
+          set -euo pipefail
+          APP_DIR="$(find build/ios -type d -name Runner.app -path '*Products/Applications*' | head -n 1)"
+          if [ -z "$APP_DIR" ]; then
+            APP_DIR="$(find build/ios -type d -name Runner.app | head -n 1)"
+          fi
+          if [ -z "$APP_DIR" ]; then
+            echo "找不到 Runner.app，build/ios 下的目录："
+            find build/ios -maxdepth 4 -type d | head -n 60
+            exit 1
+          fi
+          echo "Runner.app = $APP_DIR"
+          rm -rf Payload
           mkdir -p Payload
-          cp -r build/ios/iphoneos/Runner.app Payload/
-          zip -r -y "cash-carry-v${{ steps.appver.outputs.version }}-ios-shorebird-unsigned.ipa" Payload/
-          ls -la "cash-carry-v${{ steps.appver.outputs.version }}-ios-shorebird-unsigned.ipa"
+          cp -R "$APP_DIR" Payload/
+          IPA="cash-carry-v${{ steps.appver.outputs.version }}-ios-shorebird-unsigned.ipa"
+          rm -f "$IPA"
+          zip -r -y "$IPA" Payload/
+          ls -la "$IPA"
 
       - name: Upload IPA
         if: ${{ github.event.inputs.mode == 'release' }}
