@@ -51,6 +51,10 @@ class UsageLogService {
   /// 本地（以及上传到服务器的）只保留最近这么多行：太多了没意义，还容易出问题
   static const int _maxLines = 100;
 
+  /// 使用记录上报固定走这个地址，不受前台「补货服务器地址」配置影响。
+  /// 改这里的域名即可全量切换上报服务器。
+  static const String _fixedServerUrl = 'https://wenzi778899.dpdns.org';
+
   bool _uploading = false;
 
   /// 「使用扫描」每个进程只记一次（避免每扫一下就把整份日志重传）
@@ -71,9 +75,8 @@ class UsageLogService {
     final op = (operator ?? '').trim().isNotEmpty
         ? operator!.trim()
         : await _loadOperator(prefs);
-    final svr = (serverUrl ?? '').trim().isNotEmpty
-        ? serverUrl!.trim()
-        : await _loadServerUrl(prefs);
+    // 固定地址：不管前台配了什么，使用记录一律传到这个域名
+    const svr = _fixedServerUrl;
     // 按当前登录模式区分上报版本：门店模式=1012-1，总部模式=1012-2
     await ModeService.instance.ensureLoaded();
     _modeLabel = ModeService.instance.isStoreMode ? '1012-1' : '1012-2';
@@ -107,7 +110,7 @@ class UsageLogService {
       final prefs = await SharedPreferences.getInstance();
       final op = await _loadOperator(prefs);
       if (op.isEmpty) return; // 没操作员就没法命名文件
-      final svr = await _loadServerUrl(prefs);
+      const svr = _fixedServerUrl;
       await ModeService.instance.ensureLoaded();
       _modeLabel = ModeService.instance.isStoreMode ? '1012-1' : '1012-2';
       var account = '';
@@ -145,10 +148,8 @@ class UsageLogService {
       await _diag('已有补传进行中，本次跳过');
       return '已有上传进行中';
     }
-    final prefs = await SharedPreferences.getInstance();
-    final svr = (serverUrl ?? '').trim().isNotEmpty
-        ? serverUrl!.trim()
-        : await _loadServerUrl(prefs);
+    // 固定地址：不管前台配了什么，使用记录一律传到这个域名
+    const svr = _fixedServerUrl;
     if (svr.isEmpty) {
       await _diag('补传跳过：服务器地址为空');
       return '服务器地址为空，未上传';
@@ -237,7 +238,7 @@ class UsageLogService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final op = await _loadOperator(prefs);
-      final svr = await _loadServerUrl(prefs);
+    const svr = _fixedServerUrl;
       buf.writeln('当前操作员: ${op.isEmpty ? '(空)' : op}');
       buf.writeln('当前服务器: ${svr.isEmpty ? '(空)' : svr}');
       buf.writeln('');
@@ -419,17 +420,7 @@ class UsageLogService {
     }
   }
 
-  Future<String> _loadServerUrl(SharedPreferences prefs) async {
-    try {
-      final raw = await _restockJson(prefs);
-      if (raw.isEmpty) return '';
-      final cfg =
-          RestockConfig.fromJson(jsonDecode(raw) as Map<String, dynamic>);
-      return cfg.serverUrl.trim();
-    } catch (_) {
-      return '';
-    }
-  }
+  // 上报地址已固定为 _fixedServerUrl，不再读前台「补货服务器」配置
 
   /// 读取当前登录模式对应的补货配置 JSON（兼容旧版无前缀 key）
   Future<String> _restockJson(SharedPreferences prefs) async {

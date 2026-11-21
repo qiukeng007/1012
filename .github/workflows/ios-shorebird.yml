@@ -19,6 +19,10 @@ on:
         description: "patch 的 track"
         required: false
         default: stable
+      platforms:
+        description: "patch 的平台；android,ios 一起发才能保证两边版本号一致"
+        required: false
+        default: "android,ios"
 
 jobs:
   build:
@@ -87,6 +91,6 @@ jobs:
         env:
           SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
         run: |
-          shorebird patch ios --no-codesign \
+          shorebird patch --platforms="${{ github.event.inputs.platforms }}" --no-codesign \
             --release-version "${{ github.event.inputs.release_version }}" \
             --track "${{ github.event.inputs.track }}"
