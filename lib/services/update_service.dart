@@ -1,4 +1,6 @@
 import 'package:http/http.dart' as http;
+import 'dart:convert';
+
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -30,7 +32,9 @@ class UpdateService {
           '$fixedServer/PIC/patch_notes.txt?t=${DateTime.now().millisecondsSinceEpoch}');
       final resp = await http.get(uri).timeout(const Duration(seconds: 6));
       if (resp.statusCode != 200) return '';
-      return resp.body.trim();
+      // 服务器一般不带 charset，必须按 UTF-8 解字节，否则中文乱码
+      final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
+      return body.replaceFirst('\uFEFF', '').trim();
     } catch (_) {
       return '';
     }
