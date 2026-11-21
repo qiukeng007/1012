@@ -3053,26 +3053,29 @@ class _SettingsPageState extends State<SettingsPage>
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: _onVersionTap,
-          child: Text(
-            '当前版本: $_appVersion',
-            style: const TextStyle(
-                fontSize: 12, color: AppConstants.textSecondary),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
+            child: Text(
+              '当前版本: $_appVersion',
+              style: const TextStyle(
+                  fontSize: 12, color: AppConstants.textSecondary),
+            ),
           ),
         ),
       ),
     );
   }
 
-  /// 连续点击版本号 10 次触发管理员后门
+  /// 连续点击版本号 5 次触发管理员后门（每次间隔 3.5 秒内都算，慢点也能进）
   void _onVersionTap() {
     _versionTapTimer?.cancel();
     _versionTapCount++;
-    if (_versionTapCount >= 10) {
+    if (_versionTapCount >= 5) {
       _versionTapCount = 0;
       _askAdminPassword();
       return;
     }
-    _versionTapTimer = Timer(const Duration(milliseconds: 800), () {
+    _versionTapTimer = Timer(const Duration(milliseconds: 3500), () {
       _versionTapCount = 0;
     });
   }
