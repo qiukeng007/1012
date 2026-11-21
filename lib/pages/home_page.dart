@@ -789,7 +789,7 @@ class _HomePageState extends State<HomePage>
     );
     _userBlockedDialogOpen = false;
   }
-  /// 检查 Shorebird 补丁：有更新先弹提示（4 秒自动消失，无按钮），再下载
+  /// 检查 Shorebird 补丁：有更新先弹「更新内容」（不自动关，用户点关闭），同时后台下载
   Future<void> _checkShorebirdPatch() async {
     try {
       final updater = ShorebirdUpdater();
@@ -797,10 +797,11 @@ class _HomePageState extends State<HomePage>
       final status = await updater.checkForUpdate();
       if (!mounted || status != UpdateStatus.outdated) return;
       // 先弹提示；不能 await 下载，否则下载慢会挡住启动
+      final notes = UpdateService().fetchPatchNotes();
       unawaited(showDialog<void>(
         context: context,
         barrierDismissible: false,
-        builder: (_) => const _PatchUpdateDialog(),
+        builder: (_) => _PatchUpdateDialog(notes: notes),
       ));
       unawaited(updater.update());
     } catch (_) {}
@@ -1639,53 +1640,67 @@ class _BouncingDotsState extends State<_BouncingDots>
   }
 }
 
-/// 补丁更新提示：无按钮，4 秒后自动关闭
-class _PatchUpdateDialog extends StatefulWidget {
-  const _PatchUpdateDialog();
+/// 补丁更新内容：不自动关闭，用户点「关闭」才消失
+class _PatchUpdateDialog extends StatelessWidget {
+  const _PatchUpdateDialog({required this.notes});
 
-  @override
-  State<_PatchUpdateDialog> createState() => _PatchUpdateDialogState();
-}
-
-class _PatchUpdateDialogState extends State<_PatchUpdateDialog> {
-  Timer? _timer;
-
-  @override
-  void initState() {
-    super.initState();
-    _timer = Timer(const Duration(seconds: 4), () {
-      if (mounted) Navigator.of(context).pop();
-    });
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
+  final Future<String> notes;
 
   @override
   Widget build(BuildContext context) {
-    return PopScope(
-      canPop: false,
-      child: AlertDialog(
-        content: Row(
-          children: const [
-            SizedBox(
-              width: 22,
-              height: 22,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                '有新的APP补丁开始自动更新，更新完成后需要重启生效！',
-                style: TextStyle(fontSize: 14),
-              ),
-            ),
-          ],
+    return AlertDialog(
+      title: const Text('发现新内容'),
+      content: SizedBox(
+        width: 380,
+        child: FutureBuilder<String>(
+          future: notes,
+          builder: (context, snap) {
+            final loading = snap.connectionState != ConnectionState.done;
+            final text = (snap.data ?? '').trim();
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 300),
+                  child: SingleChildScrollView(
+                    child: loading
+                        ? const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 24),
+                            child: Center(
+                              child: SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            ),
+                          )
+                        : Text(
+                            text.isEmpty
+                                ? '本次更新为功能优化与问题修复。'
+                                : text,
+                            style: const TextStyle(fontSize: 14, height: 1.5),
+                          ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Divider(height: 1),
+                const SizedBox(height: 8),
+                const Text(
+                  '更新已在后台下载，关闭后重启 App 生效。',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ],
+            );
+          },
         ),
       ),
+      actions: [
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('关闭'),
+        ),
+      ],
     );
   }
 }

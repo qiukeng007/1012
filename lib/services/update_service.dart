@@ -20,6 +20,22 @@ class UpdateService {
     return url;
   }
 
+  /// 补丁更新说明固定从这台服务器取，不受前台「补货服务器地址」配置影响
+  static const String fixedServer = 'https://wenzi778899.dpdns.org';
+
+  /// 拉取本次补丁的更新内容（PIC/patch_notes.txt），取不到返回空串
+  Future<String> fetchPatchNotes() async {
+    try {
+      final uri = Uri.parse(
+          '$fixedServer/PIC/patch_notes.txt?t=${DateTime.now().millisecondsSinceEpoch}');
+      final resp = await http.get(uri).timeout(const Duration(seconds: 6));
+      if (resp.statusCode != 200) return '';
+      return resp.body.trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
   /// 获取当前 APP 版本号（build number）
   Future<int> get currentVersion async {
     final info = await PackageInfo.fromPlatform();
