@@ -1687,7 +1687,7 @@ class _PatchUpdateDialog extends StatelessWidget {
                 const Divider(height: 1),
                 const SizedBox(height: 8),
                 const Text(
-                  '更新已在后台下载，关闭后重启 App 生效。',
+                  '更新已在后台开始下载，关闭后重启 App 生效。',
                   style: TextStyle(fontSize: 12, color: Colors.grey),
                 ),
               ],
