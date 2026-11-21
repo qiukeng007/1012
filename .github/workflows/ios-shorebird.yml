@@ -39,6 +39,10 @@ jobs:
         id: appver
         run: echo "version=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d+ -f1)" >> "$GITHUB_OUTPUT"
 
+      - name: 清掉本机 Gradle Java 路径（仅 CI）
+        if: ${{ github.event.inputs.mode == 'patch' }}
+        run: sed -i.bak '/org.gradle.java.home/d' android/gradle.properties || true
+
       - name: Shorebird release iOS (unsigned)
         if: ${{ github.event.inputs.mode == 'release' }}
         env:
