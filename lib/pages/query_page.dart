@@ -1358,24 +1358,6 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
               ),
           ],
         ),
-        // 单位：从商品信息卡挪到库存下面，用醒目的主题色
-        if (firstData != null) ...[
-          const SizedBox(height: 2),
-          Row(
-            children: [
-              const Text('单位：',
-                  style: TextStyle(
-                      fontSize: 12, color: AppConstants.textSecondary)),
-              Text(
-                _unitOverrides[_productKey(firstData)] ?? firstData.unit,
-                style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: AppConstants.primaryColor),
-              ),
-            ],
-          ),
-        ],
         const SizedBox(height: 6),
         // 卡片行（自适应宽度，填满屏幕）
         Row(
@@ -4298,7 +4280,35 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     return t.isEmpty ? '未分类' : t;
   }
 
-  /// 点分类：从当前门店已有的分类里选（各门店 UID 不同，保存时按门店各自解析）
+  /// 把分类列表按父子层级排好：返回 (分类, 完整路径, 层级)
+  List<(StoreCategory, String, int)> _orderedCategories(
+      List<StoreCategory> list) {
+    final byParent = <String, List<StoreCategory>>{};
+    for (final c in list) {
+      byParent.putIfAbsent(c.parentId, () => <StoreCategory>[]).add(c);
+    }
+    final out = <(StoreCategory, String, int)>[];
+    final seen = <String>{};
+    void walk(String parentKey, String prefix, int depth) {
+      final children = byParent[parentKey];
+      if (children == null) return;
+      for (final c in children) {
+        if (!seen.add(c.id)) continue;
+        final path = prefix.isEmpty ? c.name : '$prefix / ${c.name}';
+        out.add((c, path, depth));
+        walk(c.id, path, depth + 1);
+      }
+    }
+
+    walk('', '', 0);
+    // 父分类缺失的数据也补到末尾，避免看不到
+    for (final c in list) {
+      if (seen.add(c.id)) out.add((c, c.name, 0));
+    }
+    return out;
+  }
+
+  /// 点分类：从当前门店已有的分类里选（含子分类，各门店 UID 不同）
   Future<void> _showCategoryEditor(ProductData data) async {
     if (!AdvancedSettingsService.instance.allowCategory) return;
     final store = widget.configs.where((c) => c.enabled).firstOrNull ??
@@ -4321,10 +4331,11 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       return;
     }
     _showBanner('已读取 ${res.categories.length} 个分类');
+    final ordered = _orderedCategories(res.categories);
     final current = _categoryText(data);
-    var selected = res.categories
-            .where((c) => c.$2.trim() == current)
-            .map((c) => c.$2)
+    var selectedId = ordered
+            .where((e) => e.$1.name.trim() == current)
+            .map((e) => e.$1.id)
             .firstOrNull ??
         '';
     showDialog(
@@ -4341,32 +4352,47 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                     style: const TextStyle(
                         fontSize: 12, color: AppConstants.textSecondary)),
                 const SizedBox(height: 8),
-                Text('${store.name} 已有的分类（只能选，不能新增）：',
+                Text('${store.name} 已有的分类（含子分类，只能选不能新增）：',
                     style: const TextStyle(
                         fontSize: 11, color: AppConstants.textSecondary)),
                 const SizedBox(height: 6),
                 ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 280),
+                  constraints: const BoxConstraints(maxHeight: 320),
                   child: ListView(
                     shrinkWrap: true,
-                    children: res.categories
-                        .map((c) => ListTile(
-                              dense: true,
-                              leading: Icon(
-                                c.$2 == selected
-                                    ? Icons.radio_button_checked
-                                    : Icons.radio_button_off,
-                                color: c.$2 == selected
-                                    ? AppConstants.primaryColor
-                                    : AppConstants.textSecondary,
-                              ),
-                              title: Text(c.$2,
-                                  maxLines: 1, overflow: TextOverflow.ellipsis),
-                              selected: c.$2 == selected,
-                              onTap: () =>
-                                  setDialogState(() => selected = c.$2),
-                            ))
-                        .toList(),
+                    children: ordered.map((e) {
+                      final c = e.$1;
+                      final depth = e.$3;
+                      final sel = c.id == selectedId;
+                      return ListTile(
+                        dense: true,
+                        visualDensity:
+                            const VisualDensity(horizontal: 0, vertical: -4),
+                        contentPadding:
+                            EdgeInsets.only(left: 8 + depth * 18, right: 8),
+                        leading: Icon(
+                          sel
+                              ? Icons.radio_button_checked
+                              : Icons.radio_button_off,
+                          size: 18,
+                          color: sel
+                              ? AppConstants.primaryColor
+                              : AppConstants.textSecondary,
+                        ),
+                        title: Text(
+                          depth > 0 ? '└ ${c.name}' : c.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: depth > 0 ? 13 : 14,
+                            fontWeight:
+                                depth > 0 ? FontWeight.normal : FontWeight.w600,
+                          ),
+                        ),
+                        selected: sel,
+                        onTap: () => setDialogState(() => selectedId = c.id),
+                      );
+                    }).toList(),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -4389,12 +4415,14 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                 backgroundColor: AppConstants.primaryColor,
                 foregroundColor: Colors.white,
               ),
-              onPressed: selected.isEmpty
+              onPressed: selectedId.isEmpty
                   ? null
                   : () {
-                      final v = selected;
+                      final hit = ordered.where((e) => e.$1.id == selectedId);
+                      if (hit.isEmpty) return;
+                      final picked = hit.first;
                       Navigator.pop(ctx);
-                      _syncCategoryChange(data, v);
+                      _syncCategoryChange(data, picked.$1.name, picked.$2);
                     },
               child: const Text('确定并同步'),
             ),
@@ -4404,8 +4432,9 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     );
   }
 
-  /// 把新分类同步到各门店：每个门店先取自己的分类列表，按名称找到自己的 UID 再保存。
-  Future<void> _syncCategoryChange(ProductData data, String newCategory) async {
+  /// 把新分类同步到各门店：每个门店按「分类路径」找到自己的 UID 再保存。
+  Future<void> _syncCategoryChange(
+      ProductData data, String newCategory, String newPath) async {
     final key = _productKey(data);
     final oldText = _categoryText(data);
     final target = newCategory.trim();
@@ -4440,23 +4469,28 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       for (final store in targets) {
         try {
           final cats = await widget.queryService.fetchStoreCategories(store);
-          String? uid;
-          for (final c in cats.categories) {
-            if (c.$2.trim() == target) {
-              uid = c.$1;
+          final ordered = _orderedCategories(cats.categories);
+          StoreCategory? hit;
+          for (final e in ordered) {
+            if (e.$2 == newPath) {
+              hit = e.$1;
               break;
             }
           }
-          if (uid == null) {
-            errors.add('${store.name}：该门店没有分类「$target」');
+          hit ??= ordered
+              .where((e) => e.$1.name.trim() == target)
+              .map((e) => e.$1)
+              .firstOrNull;
+          if (hit == null) {
+            errors.add('${store.name}：该门店没有分类「$newPath」');
             storeNotes.add('${store.name}：缺少该分类');
             continue;
           }
           final err = await widget.queryService.updateProductCategory(
             store,
             barcode,
-            categoryUid: uid,
-            categoryName: target,
+            categoryUid: hit.id,
+            categoryName: hit.name,
             productUid: data.uid?.toString(),
           );
           if (err == null) {
@@ -4494,7 +4528,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       } else {
         final storeSummary = storeNotes.map(_oneLine).join('\n');
         final report = '商品：${data.name}（条码 $barcode）\n'
-            '新分类：$target\n'
+            '新分类：$newPath\n'
             '原分类：$oldText\n'
             '当前模式：${ModeService.instance.isHqMode ? '总部模式' : '门店模式'}\n\n'
             '各门店结果：\n$storeSummary\n\n'
@@ -4504,7 +4538,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           action: '更新失败',
           barcode: barcode,
           detail: '商品：${data.name}（条码 $barcode）\n'
-              '新分类：$target（原分类$oldText）\n'
+              '新分类：$newPath（原分类$oldText）\n'
               '各门店结果：\n$storeSummary',
           name: data.name,
           errorDetail: report,
@@ -4513,7 +4547,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       }
     } catch (e, st) {
       final report = '商品：${data.name}（条码 $barcode）\n'
-          '新分类：$target\n'
+          '新分类：$newPath\n'
           '异常：$e\n\n'
           '技术细节：\n$st';
       _showCopyableError('分类更新异常', report);
@@ -4521,7 +4555,6 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       if (mounted) setState(() => _syncingProductData = false);
     }
   }
-
   /// 双击单位：只从该门店「已有的单位」里选（不支持自定义输入，避免银豹报错）
   Future<void> _showUnitEditor(ProductData data) async {
     // 高级设置里关掉了：入口图标已经不显示，这里静默忽略，不再弹提示

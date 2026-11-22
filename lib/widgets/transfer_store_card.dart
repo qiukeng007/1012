@@ -114,7 +114,11 @@ class _TransferStoreCardState extends State<TransferStoreCard> {
               else
                 const Text('—', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppConstants.textSecondary)),
               if (result.ok && result.data != null && result.data!.unit.isNotEmpty)
-                Text(result.data!.unit, style: const TextStyle(fontSize: 10, color: AppConstants.textSecondary)),
+                Text(result.data!.unit,
+                    style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: AppConstants.primaryColor)),
               if (!result.ok && result.error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 2),

@@ -1946,26 +1946,19 @@ class QueryService {
 
   /// 读取门店的「商品分类」列表（/Category/LoadCategoryDDLJson）
   /// 每个门店的分类 UID 都不一样，同步时必须按门店各自解析。
-  Future<
-      ({
-        List<(String id, String name)> categories,
-        String? error,
-        String debug
-      })> fetchStoreCategories(StoreConfig store) async {
+  /// 分类可能是多级的（parentUid 指向父分类）。
+  Future<({List<StoreCategory> categories, String? error, String debug})>
+      fetchStoreCategories(StoreConfig store) async {
     final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
     final cookie = await _sessionManager.getCookie(store.storeKey);
     if (cookie == null || cookie.isEmpty) {
-      return (categories: const <(String, String)>[], error: '未登录', debug: '');
+      return (categories: const <StoreCategory>[], error: '未登录', debug: '');
     }
     String clip(String s) => s.length > 800 ? s.substring(0, 800) : s;
     try {
       final userId = await _resolveStoreUserId(store, cookie);
       if (userId == null) {
-        return (
-          categories: const <(String, String)>[],
-          error: '无法获取门店信息',
-          debug: ''
-        );
+        return (categories: const <StoreCategory>[], error: '无法获取门店信息', debug: '');
       }
       final uri = Uri.parse('$baseUrl/Category/LoadCategoryDDLJson');
       final req = await _httpClient.postUrl(uri);
@@ -1987,7 +1980,7 @@ class QueryService {
       final body = await _readBody(resp);
       if (resp.statusCode != 200) {
         return (
-          categories: const <(String, String)>[],
+          categories: const <StoreCategory>[],
           error: '读取分类失败 (HTTP ${resp.statusCode})',
           debug: clip(body)
         );
@@ -1995,13 +1988,13 @@ class QueryService {
       final parsed = jsonDecode(body);
       if (parsed is! Map || parsed['successed'] != true) {
         return (
-          categories: const <(String, String)>[],
+          categories: const <StoreCategory>[],
           error: '读取分类失败（返回 successed=false）',
           debug: clip(body)
         );
       }
       final raw = (parsed['categorys'] as List?) ?? const [];
-      final out = <(String, String)>[];
+      final out = <StoreCategory>[];
       final seen = <String>{};
       for (final e in raw) {
         if (e is! Map) continue;
@@ -2009,11 +2002,19 @@ class QueryService {
         final name =
             (e['name'] ?? e['categoryName'] ?? e['text'] ?? '').toString().trim();
         if (id.isEmpty || name.isEmpty || !seen.add(id)) continue;
-        out.add((id, name));
+        final parent =
+            (e['parentUid'] ?? e['parentCategoryUid'] ?? '').toString().trim();
+        final tier = int.tryParse((e['tier'] ?? '').toString().trim()) ?? 0;
+        out.add(StoreCategory(
+          id: id,
+          name: name,
+          parentId: parent == '0' ? '' : parent,
+          tier: tier,
+        ));
       }
       if (out.isEmpty) {
         return (
-          categories: const <(String, String)>[],
+          categories: const <StoreCategory>[],
           error: '该门店还没有商品分类',
           debug: clip(body)
         );
@@ -2021,13 +2022,12 @@ class QueryService {
       return (categories: out, error: null, debug: '');
     } catch (e) {
       return (
-        categories: const <(String, String)>[],
+        categories: const <StoreCategory>[],
         error: '读取分类异常：$e',
         debug: ''
       );
     }
   }
-
   /// 修改商品分类（搜索→FindProduct→改 categoryUid→SaveProduct）
   /// [categoryUid] 必须是该门店自己的分类 UID（各门店不一样）。
   Future<String?> updateProductCategory(
@@ -4742,4 +4742,18 @@ class QueryService {
             '${Uri.encodeComponent(e.key)}=${Uri.encodeComponent(e.value)}')
         .join('&');
   }
+}
+/// 门店商品分类（各门店 UID 不同，可能有父子层级）
+class StoreCategory {
+  final String id;
+  final String name;
+  final String parentId;
+  final int tier;
+
+  const StoreCategory({
+    required this.id,
+    required this.name,
+    this.parentId = '',
+    this.tier = 0,
+  });
 }
