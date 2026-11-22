@@ -17,6 +17,7 @@ class TransferStoreCard extends StatefulWidget {
   final TextEditingController? stockController;
   final VoidCallback? onEditConfirm;
   final bool showButton;
+  final VoidCallback? onUnitTap;
 
   const TransferStoreCard({
     super.key,
@@ -31,6 +32,7 @@ class TransferStoreCard extends StatefulWidget {
     this.stockController,
     this.onEditConfirm,
     this.showButton = true,
+    this.onUnitTap,
   });
 
   @override
@@ -114,11 +116,19 @@ class _TransferStoreCardState extends State<TransferStoreCard> {
               else
                 const Text('—', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppConstants.textSecondary)),
               if (result.ok && result.data != null && result.data!.unit.isNotEmpty)
-                Text(result.data!.unit,
-                    style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFF28a745))),
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: widget.onUnitTap,
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    child: Text(result.data!.unit,
+                        style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF28a745))),
+                  ),
+                ),
               if (!result.ok && result.error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 2),

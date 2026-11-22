@@ -3212,6 +3212,10 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           isEditing: _editStockKey == key,
           stockController: _editStockKey == key ? _editStockController : null,
           onEditConfirm: _onEditCheckTap,
+          // 点库存卡里的单位 → 打开单位修改（入口从商品信息卡挪到这里）
+          onUnitTap: entry.data == null
+              ? null
+              : () => _showUnitEditor(entry.data!),
         ),
       ));
 
