@@ -118,7 +118,7 @@ class _TransferStoreCardState extends State<TransferStoreCard> {
                     style: const TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.bold,
-                        color: AppConstants.primaryColor)),
+                        color: Color(0xFF28a745))),
               if (!result.ok && result.error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 2),
