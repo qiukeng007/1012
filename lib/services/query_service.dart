@@ -2124,21 +2124,14 @@ class QueryService {
       }
       final product = findData['product'] as Map<String, dynamic>?;
       if (product == null) return '商品数据为空';
-      var wroteId = false;
-      for (final k in const [
-        'categoryUid',
-        'productCategoryUid',
-        'productCategoryId',
-        'categoryId'
-      ]) {
-        if (product.containsKey(k)) {
-          product[k] = categoryUid;
-          wroteId = true;
-        }
+      // 5. 写分类字段（银豹前端就是写 categoryUid + categoryName）
+      product['categoryUid'] = categoryUid;
+      if (categoryName.isNotEmpty) product['categoryName'] = categoryName;
+      for (final k in const ['productCategoryUid', 'productCategoryId', 'categoryId']) {
+        if (product.containsKey(k)) product[k] = categoryUid;
       }
-      if (!wroteId) product['categoryUid'] = categoryUid;
       if (categoryName.isNotEmpty) {
-        for (final k in const ['categoryName', 'productCategoryName']) {
+        for (final k in const ['productCategoryName']) {
           if (product.containsKey(k)) product[k] = categoryName;
         }
       }
@@ -2164,11 +2157,55 @@ class QueryService {
       }
       try {
         final saveResult = jsonDecode(saveBody) as Map<String, dynamic>;
-        if (saveResult['successed'] == true) return null;
-        return saveResult['msg'] as String? ?? '保存失败';
+        if (saveResult['successed'] != true) {
+          return saveResult['msg'] as String? ?? '保存失败';
+        }
       } catch (_) {
         return '保存响应异常';
       }
+
+      // 6. 回读校验：分类真的变了才算成功（防止服务器忽略字段还回 successed=true）
+      final verifyReq = await _httpClient.postUrl(findUri);
+      verifyReq.headers.set('User-Agent', _ua);
+      verifyReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      verifyReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      verifyReq.headers.set('Origin', baseUrl);
+      verifyReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      verifyReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      verifyReq.headers.set('Cookie', cookie);
+      verifyReq.followRedirects = false;
+      verifyReq.write('productId=$productId');
+      final verifyResp =
+          await verifyReq.close().timeout(const Duration(seconds: 15));
+      final verifyBody = await _readBody(verifyResp);
+      try {
+        final vData = jsonDecode(verifyBody) as Map<String, dynamic>;
+        final vp = vData['product'] as Map<String, dynamic>?;
+        if (vp == null) return '保存成功，但回读不到商品数据';
+        final gotUid = (vp['categoryUid'] ??
+                vp['productCategoryUid'] ??
+                vp['categoryId'] ??
+                '')
+            .toString()
+            .trim();
+        final gotName = (vp['categoryName'] ?? vp['productCategoryName'] ?? '')
+            .toString()
+            .trim();
+        if (gotUid.isEmpty) {
+          final keys = vp.keys
+              .where((k) => k.toString().toLowerCase().contains('categor'))
+              .map((k) => '$k=${vp[k]}')
+              .join(', ');
+          return '保存后分类为空（商品里分类字段：${keys.isEmpty ? '一个都没有' : keys}）';
+        }
+        if (gotUid != categoryUid) {
+          return '保存后分类没变（服务器仍是 $gotUid / $gotName，期望 $categoryUid / $categoryName）';
+        }
+      } catch (_) {
+        return '保存成功，但回读校验失败';
+      }
+      return null;
     } catch (e) {
       return '${store.name} 修改分类异常：$e';
     }
