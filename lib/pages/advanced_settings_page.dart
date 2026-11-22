@@ -91,6 +91,17 @@ class _AdvancedSettingsPageState extends State<AdvancedSettingsPage> {
                       ),
                       const Divider(height: 1),
                       _switchTile(
+                        icon: Icons.category,
+                        title: '分类修改',
+                        subtitle: '点击分类可从当前门店已有分类里更换并同步',
+                        value: _svc.allowCategory,
+                        onChanged: (v) async {
+                          await _svc.setAllowCategory(v);
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                      const Divider(height: 1),
+                      _switchTile(
                         icon: Icons.monetization_on,
                         title: '价格修改',
                         subtitle: '双击售价 / 进价可改价并同步到门店',

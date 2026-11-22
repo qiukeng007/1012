@@ -16,6 +16,7 @@ class AdvancedSettingsService extends ChangeNotifier {
   static const _keyProductName = 'adv_allow_product_name';
   static const _keySupplier = 'adv_allow_supplier';
   static const _keyUnit = 'adv_allow_unit';
+  static const _keyCategory = 'adv_allow_category';
   static const _keyPrice = 'adv_allow_price';
   static const _keyExtBarcode = 'adv_allow_ext_barcode';
 
@@ -23,6 +24,7 @@ class AdvancedSettingsService extends ChangeNotifier {
   bool _allowProductName = true;
   bool _allowSupplier = true;
   bool _allowUnit = true;
+  bool _allowCategory = true;
   bool _allowPrice = true;
   bool _allowExtBarcode = true;
 
@@ -30,6 +32,7 @@ class AdvancedSettingsService extends ChangeNotifier {
   bool get allowProductName => _allowProductName;
   bool get allowSupplier => _allowSupplier;
   bool get allowUnit => _allowUnit;
+  bool get allowCategory => _allowCategory;
   bool get allowPrice => _allowPrice;
   bool get allowExtBarcode => _allowExtBarcode;
 
@@ -39,6 +42,7 @@ class AdvancedSettingsService extends ChangeNotifier {
     _allowProductName = prefs.getBool(_keyProductName) ?? true;
     _allowSupplier = prefs.getBool(_keySupplier) ?? true;
     _allowUnit = prefs.getBool(_keyUnit) ?? true;
+    _allowCategory = prefs.getBool(_keyCategory) ?? true;
     _allowPrice = prefs.getBool(_keyPrice) ?? true;
     _allowExtBarcode = prefs.getBool(_keyExtBarcode) ?? true;
     _loaded = true;
@@ -65,6 +69,14 @@ class AdvancedSettingsService extends ChangeNotifier {
     _loaded = true;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keyUnit, value);
+    notifyListeners();
+  }
+
+  Future<void> setAllowCategory(bool value) async {
+    _allowCategory = value;
+    _loaded = true;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyCategory, value);
     notifyListeners();
   }
 

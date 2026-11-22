@@ -161,6 +161,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   final Map<String, double> _buyPriceOverrides = {};
   // 查询页手动修改的单位（商品身份键 -> 新单位，仅本次展示覆盖）
   final Map<String, String> _unitOverrides = {};
+  // 查询页手动修改的分类（商品身份键 -> 新分类名，仅本次展示覆盖）
+  final Map<String, String> _categoryOverrides = {};
 
   // 库存编辑
   String? _editStockKey;
@@ -1356,6 +1358,24 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
               ),
           ],
         ),
+        // 单位：从商品信息卡挪到库存下面，用醒目的主题色
+        if (firstData != null) ...[
+          const SizedBox(height: 2),
+          Row(
+            children: [
+              const Text('单位：',
+                  style: TextStyle(
+                      fontSize: 12, color: AppConstants.textSecondary)),
+              Text(
+                _unitOverrides[_productKey(firstData)] ?? firstData.unit,
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: AppConstants.primaryColor),
+              ),
+            ],
+          ),
+        ],
         const SizedBox(height: 6),
         // 卡片行（自适应宽度，填满屏幕）
         Row(
@@ -1665,33 +1685,33 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                   ),
                 ),
               ),
-            // 单位行（变动明细按钮已挪到下面的「门店库存」标题行）
+            // 分类行（原「单位」位置）：点一下可换分类
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Row(
                 children: [
-                  const Icon(Icons.scale,
+                  const Icon(Icons.category,
                       size: 14, color: AppConstants.textSecondary),
                   const SizedBox(width: 6),
-                  const Text('单位：',
+                  const Text('分类：',
                       style: TextStyle(
                           fontSize: 13, color: AppConstants.textSecondary)),
                   Expanded(
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
-                      onDoubleTap: AdvancedSettingsService.instance.allowUnit
-                          ? () => _showUnitEditor(data)
+                      onTap: AdvancedSettingsService.instance.allowCategory
+                          ? () => _showCategoryEditor(data)
                           : null,
                       child: Row(
                         children: [
                           Flexible(
                             child: Text(
-                              _unitOverrides[_productKey(data)] ?? data.unit,
+                              _categoryText(data),
                               style: const TextStyle(fontSize: 13),
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          if (AdvancedSettingsService.instance.allowUnit) ...[
+                          if (AdvancedSettingsService.instance.allowCategory) ...[
                             const SizedBox(width: 4),
                             const Icon(Icons.edit,
                                 size: 12, color: AppConstants.primaryColor),
@@ -4266,6 +4286,237 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       } else {
         _showBanner('部分同步失败：${errors.join('；')}', isError: true);
       }
+    } finally {
+      if (mounted) setState(() => _syncingProductData = false);
+    }
+  }
+
+  /// 当前展示的分类名（本地覆盖优先）
+  String _categoryText(ProductData data) {
+    final v = _categoryOverrides[_productKey(data)] ?? data.category;
+    final t = v.trim();
+    return t.isEmpty ? '未分类' : t;
+  }
+
+  /// 点分类：从当前门店已有的分类里选（各门店 UID 不同，保存时按门店各自解析）
+  Future<void> _showCategoryEditor(ProductData data) async {
+    if (!AdvancedSettingsService.instance.allowCategory) return;
+    final store = widget.configs.where((c) => c.enabled).firstOrNull ??
+        widget.configs.firstOrNull;
+    if (store == null) {
+      _showCopyableError('无法修改分类', '当前没有可用门店配置，请先在配置页添加并登录门店。');
+      return;
+    }
+    _showBanner('正在读取门店分类…', sticky: true);
+    final res = await widget.queryService.fetchStoreCategories(store);
+    if (!mounted) return;
+    if (res.categories.isEmpty) {
+      _showBanner('读取分类失败', isError: true);
+      _showCopyableError(
+        '读取门店分类失败',
+        '门店：${store.name}\n'
+        '原因：${(res.error == null || res.error!.isEmpty) ? '该门店还没有商品分类' : res.error}\n\n'
+        '返回原文：\n${res.debug.isEmpty ? '(空)' : res.debug}',
+      );
+      return;
+    }
+    _showBanner('已读取 ${res.categories.length} 个分类');
+    final current = _categoryText(data);
+    var selected = res.categories
+            .where((c) => c.$2.trim() == current)
+            .map((c) => c.$2)
+            .firstOrNull ??
+        '';
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('修改商品分类', style: TextStyle(fontSize: 16)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('当前分类：$current',
+                    style: const TextStyle(
+                        fontSize: 12, color: AppConstants.textSecondary)),
+                const SizedBox(height: 8),
+                Text('${store.name} 已有的分类（只能选，不能新增）：',
+                    style: const TextStyle(
+                        fontSize: 11, color: AppConstants.textSecondary)),
+                const SizedBox(height: 6),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 280),
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: res.categories
+                        .map((c) => ListTile(
+                              dense: true,
+                              leading: Icon(
+                                c.$2 == selected
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_off,
+                                color: c.$2 == selected
+                                    ? AppConstants.primaryColor
+                                    : AppConstants.textSecondary,
+                              ),
+                              title: Text(c.$2,
+                                  maxLines: 1, overflow: TextOverflow.ellipsis),
+                              selected: c.$2 == selected,
+                              onTap: () =>
+                                  setDialogState(() => selected = c.$2),
+                            ))
+                        .toList(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  ModeService.instance.isHqMode
+                      ? '保存后按各门店自己的分类编号同步，并写入一条操作记录。'
+                      : '保存后同步到所有已勾选门店，并写入一条操作记录。',
+                  style: const TextStyle(
+                      fontSize: 11, color: AppConstants.textSecondary),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('取消')),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppConstants.primaryColor,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: selected.isEmpty
+                  ? null
+                  : () {
+                      final v = selected;
+                      Navigator.pop(ctx);
+                      _syncCategoryChange(data, v);
+                    },
+              child: const Text('确定并同步'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 把新分类同步到各门店：每个门店先取自己的分类列表，按名称找到自己的 UID 再保存。
+  Future<void> _syncCategoryChange(ProductData data, String newCategory) async {
+    final key = _productKey(data);
+    final oldText = _categoryText(data);
+    final target = newCategory.trim();
+    if (target.isEmpty) {
+      _showBanner('分类不能为空', isError: true);
+      return;
+    }
+    if (target == oldText) {
+      _showBanner('分类未变化');
+      return;
+    }
+    final targets = widget.configs.where((c) => c.enabled).toList();
+    if (targets.isEmpty) {
+      _showCopyableError('无法同步分类', '没有勾选任何门店，请先在门店卡片上勾选要同步的门店。');
+      return;
+    }
+    final opName = await _ensureOperatorName();
+    if (opName == null) {
+      _showBanner('请填写操作员姓名后再修改分类', isError: true);
+      return;
+    }
+    final barcode =
+        data.barcode.isNotEmpty ? data.barcode : _lastResult?.barcode ?? '';
+    if (!mounted) return;
+    setState(() => _syncingProductData = true);
+    _showBanner('正在同步商品分类…', sticky: true);
+    final noteLabel = '更新分类$target（原分类$oldText）';
+    final errors = <String>[];
+    final storeNotes = <String>[];
+    var syncedCount = 0;
+    try {
+      for (final store in targets) {
+        try {
+          final cats = await widget.queryService.fetchStoreCategories(store);
+          String? uid;
+          for (final c in cats.categories) {
+            if (c.$2.trim() == target) {
+              uid = c.$1;
+              break;
+            }
+          }
+          if (uid == null) {
+            errors.add('${store.name}：该门店没有分类「$target」');
+            storeNotes.add('${store.name}：缺少该分类');
+            continue;
+          }
+          final err = await widget.queryService.updateProductCategory(
+            store,
+            barcode,
+            categoryUid: uid,
+            categoryName: target,
+            productUid: data.uid?.toString(),
+          );
+          if (err == null) {
+            syncedCount++;
+            storeNotes.add('${store.name}：成功');
+          } else if (err == '未登录') {
+            errors.add('${store.name}：未登录（请先在配置页登录该门店再试）');
+            storeNotes.add('${store.name}：未登录');
+          } else {
+            errors.add('${store.name}：$err');
+            storeNotes.add('${store.name}：$err');
+          }
+        } catch (e) {
+          errors.add('${store.name}：$e');
+          storeNotes.add('${store.name}：$e');
+        }
+      }
+      if (!mounted) return;
+      if (errors.isEmpty) {
+        setState(() => _categoryOverrides[key] = target);
+        _applyToLocalProducts((d) => d.copyWith(category: target));
+        for (final store in targets) {
+          try {
+            await widget.queryService.updateProductOperationNote(
+              store,
+              barcode,
+              opName,
+              noteLabel,
+              productUid: data.uid?.toString(),
+              matchLabel: '更新分类',
+            );
+          } catch (_) {}
+        }
+        _showBanner('分类已更新为「$target」✓（$syncedCount 个门店）');
+      } else {
+        final storeSummary = storeNotes.map(_oneLine).join('\n');
+        final report = '商品：${data.name}（条码 $barcode）\n'
+            '新分类：$target\n'
+            '原分类：$oldText\n'
+            '当前模式：${ModeService.instance.isHqMode ? '总部模式' : '门店模式'}\n\n'
+            '各门店结果：\n$storeSummary\n\n'
+            '错误明细：\n${errors.join('\n')}';
+        OperationLogService.add(
+          store: '分类更新',
+          action: '更新失败',
+          barcode: barcode,
+          detail: '商品：${data.name}（条码 $barcode）\n'
+              '新分类：$target（原分类$oldText）\n'
+              '各门店结果：\n$storeSummary',
+          name: data.name,
+          errorDetail: report,
+        );
+        _showCopyableError('分类更新失败', report);
+      }
+    } catch (e, st) {
+      final report = '商品：${data.name}（条码 $barcode）\n'
+          '新分类：$target\n'
+          '异常：$e\n\n'
+          '技术细节：\n$st';
+      _showCopyableError('分类更新异常', report);
     } finally {
       if (mounted) setState(() => _syncingProductData = false);
     }

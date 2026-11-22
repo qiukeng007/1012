@@ -1944,6 +1944,236 @@ class QueryService {
     }
   }
 
+  /// 读取门店的「商品分类」列表（/Category/LoadCategoryDDLJson）
+  /// 每个门店的分类 UID 都不一样，同步时必须按门店各自解析。
+  Future<
+      ({
+        List<(String id, String name)> categories,
+        String? error,
+        String debug
+      })> fetchStoreCategories(StoreConfig store) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final cookie = await _sessionManager.getCookie(store.storeKey);
+    if (cookie == null || cookie.isEmpty) {
+      return (categories: const <(String, String)>[], error: '未登录', debug: '');
+    }
+    String clip(String s) => s.length > 800 ? s.substring(0, 800) : s;
+    try {
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) {
+        return (
+          categories: const <(String, String)>[],
+          error: '无法获取门店信息',
+          debug: ''
+        );
+      }
+      final uri = Uri.parse('$baseUrl/Category/LoadCategoryDDLJson');
+      final req = await _httpClient.postUrl(uri);
+      req.headers.set('User-Agent', _ua);
+      req.headers.set('Accept', 'application/json, text/javascript, */*');
+      req.headers.set('Referer', '$baseUrl/Product/Manage');
+      req.headers.set('Origin', baseUrl);
+      req.headers.set('X-Requested-With', 'XMLHttpRequest');
+      req.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      req.headers.set('Cookie', cookie);
+      req.followRedirects = false;
+      req.write(_encodeForm({
+        'userId': userId,
+        'withMnemonicCode': 'true',
+        'withCashierCategoryDisable': 'true',
+      }));
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      final body = await _readBody(resp);
+      if (resp.statusCode != 200) {
+        return (
+          categories: const <(String, String)>[],
+          error: '读取分类失败 (HTTP ${resp.statusCode})',
+          debug: clip(body)
+        );
+      }
+      final parsed = jsonDecode(body);
+      if (parsed is! Map || parsed['successed'] != true) {
+        return (
+          categories: const <(String, String)>[],
+          error: '读取分类失败（返回 successed=false）',
+          debug: clip(body)
+        );
+      }
+      final raw = (parsed['categorys'] as List?) ?? const [];
+      final out = <(String, String)>[];
+      final seen = <String>{};
+      for (final e in raw) {
+        if (e is! Map) continue;
+        final id = (e['txtUid'] ?? e['uid'] ?? e['id'] ?? '').toString().trim();
+        final name =
+            (e['name'] ?? e['categoryName'] ?? e['text'] ?? '').toString().trim();
+        if (id.isEmpty || name.isEmpty || !seen.add(id)) continue;
+        out.add((id, name));
+      }
+      if (out.isEmpty) {
+        return (
+          categories: const <(String, String)>[],
+          error: '该门店还没有商品分类',
+          debug: clip(body)
+        );
+      }
+      return (categories: out, error: null, debug: '');
+    } catch (e) {
+      return (
+        categories: const <(String, String)>[],
+        error: '读取分类异常：$e',
+        debug: ''
+      );
+    }
+  }
+
+  /// 修改商品分类（搜索→FindProduct→改 categoryUid→SaveProduct）
+  /// [categoryUid] 必须是该门店自己的分类 UID（各门店不一样）。
+  Future<String?> updateProductCategory(
+    StoreConfig store,
+    String barcode, {
+    required String categoryUid,
+    String categoryName = '',
+    String? productUid,
+  }) async {
+    final baseUrl = store.baseUrl.replaceAll(RegExp(r'/$'), '');
+    final code = barcode.trim();
+    if (code.isEmpty) return '条码为空';
+    if (categoryUid.isEmpty) return '分类为空';
+    final cookie = await _sessionManager.getCookie(store.storeKey);
+    if (cookie == null || cookie.isEmpty) return '未登录';
+    try {
+      final userId = await _resolveStoreUserId(store, cookie);
+      if (userId == null) return '无法获取门店信息';
+      final pageData = _encodeForm({
+        'userId': userId,
+        'enable': '1',
+        'productTagUidsJson': '[]',
+        'keyword': code,
+        'groupBySpu': 'false',
+        'categorysJson': '[]',
+        'supplierUid': '',
+        'categoryType': '',
+        'pageIndex': '1',
+        'pageSize': '20',
+        'orderColumn': '',
+        'asc': 'true',
+      });
+      final searchUri = Uri.parse('$baseUrl/Product/LoadProductsByPage');
+      final searchReq = await _httpClient.postUrl(searchUri);
+      searchReq.headers.set('User-Agent', _ua);
+      searchReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      searchReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      searchReq.headers.set('Origin', baseUrl);
+      searchReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      searchReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      searchReq.headers.set('Cookie', cookie);
+      searchReq.followRedirects = false;
+      searchReq.write(pageData);
+      final searchResp =
+          await searchReq.close().timeout(const Duration(seconds: 15));
+      final searchBody = await _readBody(searchResp);
+      if (searchResp.statusCode != 200) {
+        return '搜索失败 (HTTP ${searchResp.statusCode})';
+      }
+      Map<String, dynamic> searchData;
+      try {
+        searchData = jsonDecode(searchBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '搜索返回格式异常';
+      }
+      final contentView = searchData['contentView'] as String? ?? '';
+      String? productId;
+      if (productUid != null && productUid.isNotEmpty) {
+        final uidRowRegex =
+            RegExp(r'<tr\s+data="(\d+)"\s+data-uid="(\d+)"[^>]*>');
+        for (final m in uidRowRegex.allMatches(contentView)) {
+          if (m.group(2) == productUid) {
+            productId = m.group(1);
+            break;
+          }
+        }
+      }
+      productId ??=
+          RegExp(r'<tr\s+data="(\d+)"').firstMatch(contentView)?.group(1);
+      if (productId == null) return '未找到该商品';
+      final findUri = Uri.parse('$baseUrl/Product/FindProduct');
+      final findReq = await _httpClient.postUrl(findUri);
+      findReq.headers.set('User-Agent', _ua);
+      findReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      findReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      findReq.headers.set('Origin', baseUrl);
+      findReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      findReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      findReq.headers.set('Cookie', cookie);
+      findReq.followRedirects = false;
+      findReq.write('productId=$productId');
+      final findResp = await findReq.close().timeout(const Duration(seconds: 15));
+      final findBody = await _readBody(findResp);
+      if (findResp.statusCode != 200) {
+        return '获取商品数据失败 (HTTP ${findResp.statusCode})';
+      }
+      Map<String, dynamic> findData;
+      try {
+        findData = jsonDecode(findBody) as Map<String, dynamic>;
+      } catch (_) {
+        return '商品数据解析失败';
+      }
+      final product = findData['product'] as Map<String, dynamic>?;
+      if (product == null) return '商品数据为空';
+      var wroteId = false;
+      for (final k in const [
+        'categoryUid',
+        'productCategoryUid',
+        'productCategoryId',
+        'categoryId'
+      ]) {
+        if (product.containsKey(k)) {
+          product[k] = categoryUid;
+          wroteId = true;
+        }
+      }
+      if (!wroteId) product['categoryUid'] = categoryUid;
+      if (categoryName.isNotEmpty) {
+        for (final k in const ['categoryName', 'productCategoryName']) {
+          if (product.containsKey(k)) product[k] = categoryName;
+        }
+      }
+      final productJson = jsonEncode(product);
+      final saveData =
+          'userId=$userId&productJson=${Uri.encodeComponent(productJson)}';
+      final saveUri = Uri.parse('$baseUrl/Product/SaveProduct');
+      final saveReq = await _httpClient.postUrl(saveUri);
+      saveReq.headers.set('User-Agent', _ua);
+      saveReq.headers.set('Accept', 'application/json, text/javascript, */*');
+      saveReq.headers.set('Referer', '$baseUrl/Product/Manage');
+      saveReq.headers.set('Origin', baseUrl);
+      saveReq.headers.set('X-Requested-With', 'XMLHttpRequest');
+      saveReq.headers.set('Content-Type',
+          'application/x-www-form-urlencoded; charset=UTF-8');
+      saveReq.headers.set('Cookie', cookie);
+      saveReq.followRedirects = false;
+      saveReq.write(saveData);
+      final saveResp = await saveReq.close().timeout(const Duration(seconds: 15));
+      final saveBody = await _readBody(saveResp);
+      if (saveResp.statusCode != 200) {
+        return '保存失败 (HTTP ${saveResp.statusCode})';
+      }
+      try {
+        final saveResult = jsonDecode(saveBody) as Map<String, dynamic>;
+        if (saveResult['successed'] == true) return null;
+        return saveResult['msg'] as String? ?? '保存失败';
+      } catch (_) {
+        return '保存响应异常';
+      }
+    } catch (e) {
+      return '${store.name} 修改分类异常：$e';
+    }
+  }
+
   /// 修改商品名称（与修改库存同一流程：搜索→FindProduct→改字段→SaveProduct）
   ///
   /// 返回 null 表示成功，否则返回错误信息。
