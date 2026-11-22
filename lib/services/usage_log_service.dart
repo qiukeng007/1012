@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shorebird_code_push/shorebird_code_push.dart';
 import '../models/store_config.dart';
 import 'mode_service.dart';
 import 'config_service.dart';
@@ -35,14 +36,23 @@ class UsageLogService {
     if (_internalVersion.isNotEmpty) return _internalVersion;
     try {
       final info = await PackageInfo.fromPlatform();
-      _internalVersion =
-          info.version;
+      var v = info.version;
+      // 带上 Shorebird 补丁号：1.0.24 -> 1.0.24.21
+      try {
+        final updater = ShorebirdUpdater();
+        if (updater.isAvailable) {
+          final patch = await updater.readCurrentPatch();
+          if (patch != null) {
+            v = '$v.${patch.number.toString().padLeft(2, '0')}';
+          }
+        }
+      } catch (_) {}
+      _internalVersion = v;
     } catch (_) {
       _internalVersion = '未知';
     }
     return _internalVersion;
   }
-
   static const String _prefsKeyLegacy = 'restock_config';
   static const String _logDirName = 'usage_log';
   static const String _diagKey = 'usage_log_diag';
