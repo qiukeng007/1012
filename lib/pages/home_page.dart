@@ -789,24 +789,44 @@ class _HomePageState extends State<HomePage>
     );
     _userBlockedDialogOpen = false;
   }
-  /// 检查 Shorebird 补丁：有更新先弹「更新内容」（不自动关，用户点关闭），同时后台下载
+  /// 检查 Shorebird 补丁：先下载，下载完成后再弹「更新内容」，点「重启」生效
   Future<void> _checkShorebirdPatch() async {
     try {
       final updater = ShorebirdUpdater();
       if (!updater.isAvailable) return;
       final status = await updater.checkForUpdate();
       if (!mounted || status != UpdateStatus.outdated) return;
-      // 先弹提示；不能 await 下载，否则下载慢会挡住启动
+
       final notes = UpdateService().fetchPatchNotes();
+      var downloadingOpen = true;
       unawaited(showDialog<void>(
         context: context,
         barrierDismissible: false,
-        builder: (_) => _PatchUpdateDialog(notes: notes),
-      ));
-      unawaited(updater.update());
+        builder: (_) => const _PatchDownloadingDialog(),
+      ).then((_) => downloadingOpen = false));
+
+      var updated = true;
+      try {
+        await updater.update();
+      } catch (_) {
+        updated = false;
+      }
+      if (!mounted) return;
+
+      // 关掉“正在下载”
+      if (downloadingOpen) {
+        Navigator.of(context, rootNavigator: true).pop();
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      }
+      if (!mounted) return;
+
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => _PatchUpdateDialog(notes: notes, updated: updated),
+      );
     } catch (_) {}
   }
-
   void _navigateToRestock(RestockPrefillData data) {
     setState(() {
       _prefillData = data;
@@ -1640,11 +1660,42 @@ class _BouncingDotsState extends State<_BouncingDots>
   }
 }
 
-/// 补丁更新内容：不自动关闭，用户点「关闭」才消失
+/// 正在下载补丁：无按钮、不可返回，下载完自动关闭
+class _PatchDownloadingDialog extends StatelessWidget {
+  const _PatchDownloadingDialog();
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: Row(
+          children: const [
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                '正在下载更新，请稍候…',
+                style: TextStyle(fontSize: 14),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 补丁更新内容：下载完成后弹出，点「重启」结束进程，下次打开即生效
 class _PatchUpdateDialog extends StatelessWidget {
-  const _PatchUpdateDialog({required this.notes});
+  const _PatchUpdateDialog({required this.notes, this.updated = true});
 
   final Future<String> notes;
+  final bool updated;
 
   @override
   Widget build(BuildContext context) {
@@ -1676,9 +1727,7 @@ class _PatchUpdateDialog extends StatelessWidget {
                             ),
                           )
                         : Text(
-                            text.isEmpty
-                                ? '本次更新为功能优化与问题修复。'
-                                : text,
+                            text.isEmpty ? '本次更新为功能优化与问题修复。' : text,
                             style: const TextStyle(fontSize: 14, height: 1.5),
                           ),
                   ),
@@ -1686,9 +1735,11 @@ class _PatchUpdateDialog extends StatelessWidget {
                 const SizedBox(height: 12),
                 const Divider(height: 1),
                 const SizedBox(height: 8),
-                const Text(
-                  '更新已在后台开始下载，关闭后重启 App 生效。',
-                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                Text(
+                  updated
+                      ? '更新已下载完成，点「重启」后生效。'
+                      : '更新下载失败，可稍后重启 App 再试。',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey),
                 ),
               ],
             );
@@ -1697,8 +1748,12 @@ class _PatchUpdateDialog extends StatelessWidget {
       ),
       actions: [
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('关闭'),
+          onPressed: () {
+            Navigator.of(context).pop();
+            // 结束进程：下次打开就是新补丁（iOS 不支持程序内重启）
+            exit(0);
+          },
+          child: const Text('重启'),
         ),
       ],
     );
