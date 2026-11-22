@@ -3645,7 +3645,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       ProductData data, String current, String newSupplier) async {
     final barcode =
         data.barcode.isNotEmpty ? data.barcode : _lastResult?.barcode ?? '';
-    if (current == newSupplier) {
+    // 总部模式下即使值相同也继续，用来统一各门店不一致的供货商
+    if (current == newSupplier && !ModeService.instance.isHqMode) {
       _showBanner('供货商未变化');
       return;
     }
@@ -3656,46 +3657,12 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       _showBanner('请填写操作员姓名后再更新供货商', isError: true);
       return;
     }
-    // 总部模式：供货商一次同步到全部门店（官方同步接口，快）
-    final hqSource = _hqSyncSource();
-    if (hqSource != null) {
-      if (!mounted) return;
-      setState(() => _syncingProductData = true);
-      _showBanner('正在同步供货商…', sticky: true);
-      try {
-        final targets = widget.configs
-            .where((c) => c.storeKey != hqSource.storeKey)
-            .toList();
-        final (globalErr, results) =
-            await widget.queryService.syncProductSupplierToStores(
-          source: hqSource,
-          targets: targets,
-          barcode: barcode,
-          newSupplierName: newSupplier,
-          productUid: data.uid?.toString(),
-          noteOperatorName: opName,
-          noteActionLabel: '更新供货商$newSupplier（原供货商$current）',
-          noteMatchLabel: '更新供货商',
-        );
-        final errors = <String>[
-          if (globalErr != null) '${hqSource.name}：$globalErr',
-          for (final r in results)
-            if (r.$2 != null) '${r.$1.name}：${r.$2}',
-        ];
-        if (!mounted) return;
-        if (errors.isEmpty) {
-          _supplierOverrides[barcode] = newSupplier;
-          _applyToLocalProducts((d) => d.copyWith(supplier: newSupplier));
-          _showBanner('供货商已更新为「$newSupplier」并同步全部门店 ✓');
-        } else {
-          _showBanner('供货商同步失败：${errors.join('；')}', isError: true);
-        }
-      } finally {
-        if (mounted) setState(() => _syncingProductData = false);
-      }
-      return;
-    }
-    final targetStores = widget.configs.where((c) => c.enabled).toList();
+    // 总部模式：写全部门店（不勾选也要同步，保证各店数据一致）
+    // 门店模式：只写勾选的门店
+    final hqMode = ModeService.instance.isHqMode;
+    final targetStores = hqMode
+        ? widget.configs.toList()
+        : widget.configs.where((c) => c.enabled).toList();
     if (targetStores.isEmpty) {
       _showBanner('未勾选任何门店，无法同步供货商', isError: true);
       return;
@@ -3706,6 +3673,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
     _showBanner('正在同步供货商…', sticky: true);
     final errors = <String>[];
     var syncedCount = 0;
+    final notLogged = <String>[];
     try {
       for (final store in targetStores) {
         try {
@@ -3751,11 +3719,14 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
           }
         }
         _showBanner(descErrors.isEmpty
-            ? '供货商已更新为「$newSupplier」✓'
+            ? '供货商已更新为「$newSupplier」✓（$syncedCount 个门店）'
             : '供货商已更新为「$newSupplier」，描述未写入：${descErrors.join('；')}',
             isError: descErrors.isNotEmpty);
       } else {
-        _showBanner('部分同步失败：${errors.join('；')}', isError: true);
+        final notLoggedText =
+            notLogged.isEmpty ? '' : '（未登录：${notLogged.join('、')}）';
+        _showBanner('部分同步失败：${errors.join('；')}$notLoggedText',
+            isError: true);
       }
     } finally {
       if (mounted) setState(() => _syncingProductData = false);
@@ -3929,7 +3900,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       });
       if (errors.isEmpty) {
         if (syncedCount == 0) {
-          _showBanner('勾选的门店都没有登录，无法同步', isError: true);
+          _showBanner('门店都没有登录，无法同步', isError: true);
           return;
         }
         // 操作记录描述（失败不阻断，静默忽略）
@@ -4398,8 +4369,8 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
                 const SizedBox(height: 8),
                 Text(
                   ModeService.instance.isHqMode
-                      ? '保存后按各门店自己的分类编号同步，并写入一条操作记录。'
-                      : '保存后同步到所有已勾选门店，并写入一条操作记录。',
+                      ? '总部模式：保存后写全部门店（各门店用自己的分类编号），分类不一致的也会被统一。'
+                      : '门店模式：只修改勾选的门店。',
                   style: const TextStyle(
                       fontSize: 11, color: AppConstants.textSecondary),
                 ),
@@ -4442,13 +4413,20 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
       _showBanner('分类不能为空', isError: true);
       return;
     }
-    if (target == oldText) {
+    // 总部模式下即使值相同也继续，用来统一各门店不一致的分类
+    if (target == oldText && !ModeService.instance.isHqMode) {
       _showBanner('分类未变化');
       return;
     }
-    final targets = widget.configs.where((c) => c.enabled).toList();
+    // 总部模式：写全部门店（不勾选也同步，保证各店分类一致）
+    // 门店模式：只写勾选的门店
+    final hqMode = ModeService.instance.isHqMode;
+    final targets = hqMode
+        ? widget.configs.toList()
+        : widget.configs.where((c) => c.enabled).toList();
     if (targets.isEmpty) {
-      _showCopyableError('无法同步分类', '没有勾选任何门店，请先在门店卡片上勾选要同步的门店。');
+      _showCopyableError('无法同步分类',
+          '当前没有任何门店配置，请先在配置页添加并登录门店。');
       return;
     }
     final opName = await _ensureOperatorName();
