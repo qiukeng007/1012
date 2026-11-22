@@ -53,13 +53,9 @@ class UsageLogService {
 
   /// 使用记录上报固定走这个地址，不受前台「补货服务器地址」配置影响。
   /// 改这里的域名即可全量切换上报服务器。
-  /// 门店模式写 /b5 实例（记录落在 b5/PIC/），总部模式写根实例（落在 PIC/）
-  static const String _fixedServerUrlHq = 'https://wenzi778899.dpdns.org';
-  static const String _fixedServerUrlStore = 'https://wenzi778899.dpdns.org/b5';
-
-  String get _fixedServerUrl => ModeService.instance.isStoreMode
-      ? _fixedServerUrlStore
-      : _fixedServerUrlHq;
+  /// 使用记录上报固定走根地址：两种模式都写到 <网站根>/pic/ 下，
+  /// 不受前台「补货服务器地址」配置影响。
+  static const String _fixedServerUrl = 'https://wenzi778899.dpdns.org';
 
   bool _uploading = false;
 
@@ -82,7 +78,7 @@ class UsageLogService {
         ? operator!.trim()
         : await _loadOperator(prefs);
     // 固定地址：不管前台配了什么，使用记录一律传到这个域名
-    final svr = _fixedServerUrl;
+    const svr = _fixedServerUrl;
     // 按当前登录模式区分上报版本：门店模式=1012-1，总部模式=1012-2
     await ModeService.instance.ensureLoaded();
     _modeLabel = ModeService.instance.isStoreMode ? '1012-1' : '1012-2';
@@ -116,7 +112,7 @@ class UsageLogService {
       final prefs = await SharedPreferences.getInstance();
       final op = await _loadOperator(prefs);
       if (op.isEmpty) return; // 没操作员就没法命名文件
-      final svr = _fixedServerUrl;
+      const svr = _fixedServerUrl;
       await ModeService.instance.ensureLoaded();
       _modeLabel = ModeService.instance.isStoreMode ? '1012-1' : '1012-2';
       var account = '';
@@ -155,7 +151,7 @@ class UsageLogService {
       return '已有上传进行中';
     }
     // 固定地址：不管前台配了什么，使用记录一律传到这个域名
-    final svr = _fixedServerUrl;
+    const svr = _fixedServerUrl;
     if (svr.isEmpty) {
       await _diag('补传跳过：服务器地址为空');
       return '服务器地址为空，未上传';
@@ -244,7 +240,7 @@ class UsageLogService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final op = await _loadOperator(prefs);
-    final svr = _fixedServerUrl;
+    const svr = _fixedServerUrl;
       buf.writeln('当前操作员: ${op.isEmpty ? '(空)' : op}');
       buf.writeln('当前服务器: ${svr.isEmpty ? '(空)' : svr}');
       buf.writeln('');
