@@ -97,5 +97,6 @@ jobs:
         run: |
           shorebird patch --platforms="${{ github.event.inputs.platforms }}" --no-codesign \
             --allow-native-diffs \
+            --allow-asset-diffs \
             --release-version "${{ github.event.inputs.release_version }}" \
             --track "${{ github.event.inputs.track }}"
