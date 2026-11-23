@@ -94,6 +94,11 @@ class _HomePageState extends State<HomePage>
   final Set<String> _verifiedKeys = {};
   bool _serverOnline = false;
   Timer? _serverCheckTimer;
+
+  // 补丁：长时间不关 App 也要能收到更新 → 隔天检查一次
+  Timer? _patchDayTimer;
+  DateTime _lastPatchDay = DateTime.now();
+  bool _patchCheckRunning = false;
   int _pendingSubmitCount = 0;
   bool _flushingOffline = false;
   int _photoQueueCount = 0;
@@ -143,9 +148,13 @@ class _HomePageState extends State<HomePage>
     // 保活服务一直挂着（前台也挂）—— 状态栏常驻「保持在线」图标，
     // 语音引擎和通知监听也不会被系统冻掉
     unawaited(ForegroundService.start());
-    // Shorebird 补丁：发现新补丁先弹提示，再后台下载（重启后生效）
+    // Shorebird 补丁：启动检查一次，之后隔天检查（下载完再弹内容，点重启生效）
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      unawaited(_checkShorebirdPatch());
+      _maybeCheckPatchOnNewDay(force: true);
+    });
+    // 每 20 分钟看一次是不是隔天了（一直不关 App 也能拿到更新）
+    _patchDayTimer = Timer.periodic(const Duration(minutes: 20), (_) {
+      _maybeCheckPatchOnNewDay();
     });
   }
 
@@ -157,6 +166,7 @@ class _HomePageState extends State<HomePage>
     _queueRing.dispose();
     _serverCheckTimer?.cancel();
     _notifyDotTimer?.cancel();
+    _patchDayTimer?.cancel();
     _restockImageNotifier.dispose();
     _restockSupplierNotifier.dispose();
     _tabIndex.dispose();
@@ -201,6 +211,8 @@ class _HomePageState extends State<HomePage>
         unawaited(NotifyService.instance.ensureConnected());
         unawaited(_refreshNotifyDot());
         _startNotifyDotTimer();
+        // 隔天回到前台也检查一次补丁
+        _maybeCheckPatchOnNewDay();
         // 队列自愈：回到前台主动把照片队列跑起来。
         // 以前只有「启动 App」或「再提交照片」才会启动，
         // 一旦被系统中断过，任务会一直卡在「处理中」等到下一次提交。
@@ -789,8 +801,22 @@ class _HomePageState extends State<HomePage>
     );
     _userBlockedDialogOpen = false;
   }
+  /// 隔天检查一次补丁：用户一直不关 App 也能拿到更新
+  void _maybeCheckPatchOnNewDay({bool force = false}) {
+    final now = DateTime.now();
+    final changed = force ||
+        now.year != _lastPatchDay.year ||
+        now.month != _lastPatchDay.month ||
+        now.day != _lastPatchDay.day;
+    if (!changed) return;
+    _lastPatchDay = now;
+    unawaited(_checkShorebirdPatch());
+  }
+
   /// 检查 Shorebird 补丁：先下载，下载完成后再弹「更新内容」，点「重启」生效
   Future<void> _checkShorebirdPatch() async {
+    if (_patchCheckRunning) return;
+    _patchCheckRunning = true;
     try {
       final updater = ShorebirdUpdater();
       if (!updater.isAvailable) return;
@@ -825,7 +851,10 @@ class _HomePageState extends State<HomePage>
         barrierDismissible: false,
         builder: (_) => _PatchUpdateDialog(notes: notes, updated: updated),
       );
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      _patchCheckRunning = false;
+    }
   }
   void _navigateToRestock(RestockPrefillData data) {
     setState(() {
