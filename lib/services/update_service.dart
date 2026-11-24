@@ -83,13 +83,26 @@ class UpdateService {
     final currentBuild = int.tryParse(info.buildNumber) ?? 0;
 
     try {
-      // 加时间戳，避免服务器/CDN 缓存旧版本号
-      final uri = Uri.parse(
-          '$url/PIC/app_version.txt?t=${DateTime.now().millisecondsSinceEpoch}');
-      final response = await http.get(uri).timeout(const Duration(seconds: 5));
-      if (response.statusCode != 200) return '';
-      final remoteText = response.body.trim();
-      final remote = parse(remoteText);
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      // 新格式：PIC/app_version_full.txt 写 1.0.25（新版读这个）
+      // 旧客户端只认 PIC/app_version.txt 里的构建号（如 58），两个文件都要维护
+      var remoteText = '';
+      try {
+        final fullUri = Uri.parse('$url/PIC/app_version_full.txt?t=$ts');
+        final fullResp =
+            await http.get(fullUri).timeout(const Duration(seconds: 5));
+        if (fullResp.statusCode == 200) {
+          remoteText =
+              utf8.decode(fullResp.bodyBytes, allowMalformed: true).trim();
+        }
+      } catch (_) {}
+      if (remoteText.isEmpty) {
+        final uri = Uri.parse('$url/PIC/app_version.txt?t=$ts');
+        final response =
+            await http.get(uri).timeout(const Duration(seconds: 5));
+        if (response.statusCode != 200) return '';
+        remoteText = response.body.trim();
+      }      final remote = parse(remoteText);
       if (remote.isEmpty) return '';
 
       // 旧服务器可能还写着 1012.43 这种老格式：新版 1.x 直接忽略，避免被旧号卡住

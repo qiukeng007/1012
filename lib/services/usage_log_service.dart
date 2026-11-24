@@ -422,7 +422,18 @@ class UsageLogService {
   /// 避免多个用户用同一个操作员名时互相覆盖服务器上的文件。
   Future<String> _fileBase(String operator) async {
     final id = await _deviceId();
-    return '$operator$_deviceTag$id';
+    final base = '$operator$_deviceTag$id';
+    // 老版本用的是「操作员.txt」：升级后第一次上报就改名成新文件名，
+    // 避免本地同一个操作员出现两份记录。
+    try {
+      final dir = await _logDir();
+      final oldF = File('${dir.path}${Platform.pathSeparator}$operator.txt');
+      final newF = File('${dir.path}${Platform.pathSeparator}$base.txt');
+      if (await oldF.exists() && !await newF.exists()) {
+        await oldF.rename(newF.path);
+      }
+    } catch (_) {}
+    return base;
   }
   /// 本地追加一行到「操作员.txt」，只保留最近 _maxLines 行（老的自动丢掉）。
   /// 上传的是整份文件，所以上传内容也自然只带最近 100 行。

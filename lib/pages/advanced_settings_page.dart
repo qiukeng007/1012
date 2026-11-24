@@ -102,6 +102,17 @@ class _AdvancedSettingsPageState extends State<AdvancedSettingsPage> {
                       ),
                       const Divider(height: 1),
                       _switchTile(
+                        icon: Icons.inventory_2,
+                        title: '库存修改',
+                        subtitle: '允许双击库存改数量、点击卡片调货',
+                        value: _svc.allowStock,
+                        onChanged: (v) async {
+                          await _svc.setAllowStock(v);
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                      const Divider(height: 1),
+                      _switchTile(
                         icon: Icons.monetization_on,
                         title: '价格修改',
                         subtitle: '双击售价 / 进价可改价并同步到门店',

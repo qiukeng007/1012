@@ -3148,6 +3148,10 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   }
 
   void _onTransferTap(String storeKey) {
+    if (!AdvancedSettingsService.instance.allowStock) {
+      _showBanner('库存修改已在高级设置里关闭', isError: true);
+      return;
+    }
     _barcodeFocus.unfocus(); // 输入框失去焦点
     final keys = _getStoreKeys();
 
@@ -3298,6 +3302,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   }
 
   void _startEditStock(String storeKey) {
+    if (!AdvancedSettingsService.instance.allowStock) return;
     if (_transferQty != 0) return;
     final storeData = _lastResult?.stores[storeKey]?.data;
     setState(() {
@@ -5450,6 +5455,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   }
 
   Future<void> _confirmTransfer() async {
+    if (!AdvancedSettingsService.instance.allowStock) return;
     if (_transferQty == 0 || _lastResult == null) return;
     final qty = _transferQty.abs();
     final keys = _getStoreKeys();
