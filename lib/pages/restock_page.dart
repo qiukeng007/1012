@@ -335,11 +335,11 @@ class _ReplenishFormState extends State<_ReplenishForm>
     _shopCtrl.text = data.supplier;
     _barcodeCtrl.text = data.barcode;
     _priceBarcode = data.barcode.trim();
-    // 使用预填的商品名称
-    if (data.productName.isNotEmpty && _descCtrl.text.isEmpty) {
-      _descCtrl.text = data.productName;
-    }
-    // 队列里还没传完的新照片优先：直接用这张发补货，不用等队列先同步到银豹
+    // 换商品：描述直接覆盖成新商品名
+    _descCtrl.text = data.productName;
+    // 页面常驻后必须清掉上一件商品的照片，否则会把上一张发给后台
+    _imageFile = null;
+    _imageFromUser = false;
     final localBytes = data.imageBytes;
     if (localBytes != null && localBytes.isNotEmpty) {
       // 这张照片已经在后台队列里同步银豹了，不能当成「用户新拍的照片」再排一次队
@@ -1608,14 +1608,14 @@ class _BookingFormState extends State<_BookingForm>
     });
     _shopCtrl.text = data.supplier;
     _barcodeCtrl.text = data.barcode;
-    if (_descCtrl.text.trim().isEmpty) {
-      final parts = <String>[
-        if (data.productName.isNotEmpty) data.productName,
-        if (data.specification.isNotEmpty && data.specification != '-')
-          data.specification,
-      ];
-      _descCtrl.text = parts.join(' ');
-    }
+    final parts = <String>[
+      if (data.productName.isNotEmpty) data.productName,
+      if (data.specification.isNotEmpty && data.specification != '-')
+        data.specification,
+    ];
+    _descCtrl.text = parts.join(' ');
+    // 换商品先清掉上一张照片，避免串货
+    _imageFile = null;
     final localBytes = data.imageBytes;
     if (localBytes != null && localBytes.isNotEmpty) {
       // 等切页动画走完再处理图片
