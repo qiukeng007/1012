@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:io';
+import 'dart:math';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -58,6 +59,9 @@ class UsageLogService {
   static const String _diagKey = 'usage_log_diag';
   static const int _maxDiag = 100;
 
+  /// 设备识别码（首次生成后固定存在本机，用来区分同名操作员）
+  static const String _deviceIdKey = 'usage_device_id';
+
   /// 本地（以及上传到服务器的）只保留最近这么多行：太多了没意义，还容易出问题
   static const int _maxLines = 100;
 
@@ -100,7 +104,8 @@ class UsageLogService {
     final verLabel = await _internalVersionLabel();
     final line = _buildLine(op, account, employee, password,
         event: event, internalVersion: verLabel);
-    final saved = await _appendLocal(op, line);
+    final fileBase = await _fileBase(op);
+    final saved = await _appendLocal(fileBase, line);
     if (!saved) {
       await _diag('本地记录写入失败（存储异常）');
       return '本地记录写入失败';
@@ -145,7 +150,8 @@ class UsageLogService {
       final ver = await _internalVersionLabel();
       final line = _buildLine(op, account, employee, password,
           event: '使用扫描', internalVersion: ver);
-      final saved = await _appendLocal(op, line);
+      final fileBase = await _fileBase(op);
+    final saved = await _appendLocal(fileBase, line);
       if (!saved) return;
       await _diag('已本地记录：$line');
       if (svr.isNotEmpty) {
@@ -321,10 +327,10 @@ class UsageLogService {
 
   /// 上传操作员的整份本地记录（覆盖服务器上同名文件）。
   /// 成功返回 null，失败返回错误说明。
-  Future<String?> _upload(String serverUrl, String operator) async {
+  Future<String?> _upload(String serverUrl, String fileBase) async {
     try {
       final f = File('${(await _logDir()).path}'
-          '${Platform.pathSeparator}$operator.txt');
+          '${Platform.pathSeparator}$fileBase.txt');
       if (!await f.exists()) return null;
       final content = await f.readAsBytes();
       // 用户可能只填了 10.0.0.16 没带协议头，这里自动补全
@@ -338,7 +344,7 @@ class UsageLogService {
       // （会返回“参数为空”且不写文件），必须手动拼 multipart 并固定
       // Content-Length 发送，服务器才正常保存（本地已实测）。
       final boundary = '----cashcarry${DateTime.now().millisecondsSinceEpoch}';
-      final user = utf8.encode(operator);
+      final user = utf8.encode(fileBase);
       final body = BytesBuilder();
       void w(List<int> bytes) => body.add(bytes);
       void line(String s) => w(utf8.encode('$s\r\n'));
@@ -389,13 +395,42 @@ class UsageLogService {
     }
   }
 
+  /// 设备类型：Android / iOS / Other
+  String get _deviceTag {
+    if (Platform.isAndroid) return 'Android';
+    if (Platform.isIOS) return 'iOS';
+    return 'Other';
+  }
+
+  /// 本机固定识别码（6 位十六进制，首次生成后保存）
+  Future<String> _deviceId() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      var id = (prefs.getString(_deviceIdKey) ?? '').trim();
+      if (id.isEmpty) {
+        final r = Random.secure();
+        id = List.generate(6, (_) => r.nextInt(16).toRadixString(16)).join();
+        await prefs.setString(_deviceIdKey, id);
+      }
+      return id;
+    } catch (_) {
+      return '000000';
+    }
+  }
+
+  /// 上传文件名：操作员 + 设备 + 识别码，例如 蚊子Android1a2b3c
+  /// 避免多个用户用同一个操作员名时互相覆盖服务器上的文件。
+  Future<String> _fileBase(String operator) async {
+    final id = await _deviceId();
+    return '$operator$_deviceTag$id';
+  }
   /// 本地追加一行到「操作员.txt」，只保留最近 _maxLines 行（老的自动丢掉）。
   /// 上传的是整份文件，所以上传内容也自然只带最近 100 行。
-  Future<bool> _appendLocal(String operator, String line) async {
+  Future<bool> _appendLocal(String fileBase, String line) async {
     try {
       final dir = await _logDir();
       if (!await dir.exists()) await dir.create(recursive: true);
-      final f = File('${dir.path}${Platform.pathSeparator}$operator.txt');
+      final f = File('${dir.path}${Platform.pathSeparator}$fileBase.txt');
       final lines = <String>[];
       if (await f.exists()) {
         final content = await f.readAsString();

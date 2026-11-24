@@ -254,7 +254,11 @@ class _ReplenishForm extends StatefulWidget {
   State<_ReplenishForm> createState() => _ReplenishFormState();
 }
 
-class _ReplenishFormState extends State<_ReplenishForm> {
+class _ReplenishFormState extends State<_ReplenishForm>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
   // 本次查询/补货的当前门店（照片以它为源店上传再同步其他门店）
   StoreConfig? _activeStore;
   final _formKey = GlobalKey<FormState>();
@@ -959,6 +963,7 @@ class _ReplenishFormState extends State<_ReplenishForm> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Form(
@@ -1156,6 +1161,9 @@ class _ReplenishFormState extends State<_ReplenishForm> {
                           _imageFile!,
                           fit: BoxFit.contain,
                           width: double.infinity,
+                          cacheWidth: 900,
+                          gaplessPlayback: true,
+                          filterQuality: FilterQuality.low,
                         ),
                       )
                     : const Center(
@@ -1477,7 +1485,11 @@ class _BookingForm extends StatefulWidget {
   State<_BookingForm> createState() => _BookingFormState();
 }
 
-class _BookingFormState extends State<_BookingForm> {
+class _BookingFormState extends State<_BookingForm>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
   final _formKey = GlobalKey<FormState>();
   String? _selectedShop;
   final _shopCtrl = TextEditingController();
@@ -1787,6 +1799,7 @@ class _BookingFormState extends State<_BookingForm> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Form(
@@ -1941,6 +1954,9 @@ class _BookingFormState extends State<_BookingForm> {
                           _imageFile!,
                           fit: BoxFit.contain,
                           width: double.infinity,
+                          cacheWidth: 900,
+                          gaplessPlayback: true,
+                          filterQuality: FilterQuality.low,
                         ),
                       )
                     : const Center(
@@ -2247,7 +2263,11 @@ class _OrderList extends StatefulWidget {
   State<_OrderList> createState() => _OrderListState();
 }
 
-class _OrderListState extends State<_OrderList> {
+class _OrderListState extends State<_OrderList>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
   List<OrderRecord> _orders = [];
   bool _loading = false;
   String _searchKey = '';
@@ -2356,6 +2376,7 @@ class _OrderListState extends State<_OrderList> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     return Column(
       children: [
         // 搜索和排序
