@@ -1436,6 +1436,8 @@ class _HomePageState extends State<HomePage>
         children: [
           PageView(
             controller: _pageController,
+            // 预建相邻页：点「补货/预订」时不再现建整页，避免卡顿
+            allowImplicitScrolling: true,
             onPageChanged: (i) {
               // 切页就把输入焦点释放掉，键盘自动收起
               FocusManager.instance.primaryFocus?.unfocus();

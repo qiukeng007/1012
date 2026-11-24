@@ -71,7 +71,10 @@ class RestockPage extends StatefulWidget {
 }
 
 class _RestockPageState extends State<RestockPage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
   late TabController _tabController;
 
   // 顾客预定提交成功后递增，强制重建表单实现彻底清空
@@ -143,6 +146,7 @@ class _RestockPageState extends State<RestockPage>
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     final config = widget.restockService;
     if (!config.serverUrl.isNotEmpty) {
       return Center(
@@ -293,6 +297,8 @@ class _ReplenishFormState extends State<_ReplenishForm>
   /// 条码框默认数字键盘；点小键盘图标可切成字母/中文键盘
   bool _barcodeLetters = false;
   File? _imageFile;
+  /// 预填照片正在下载/压缩，用于显示「照片加载中…」
+  bool _imageLoading = false;
   bool _submitting = false;
   /// 用户是否在补货界面手动上传/拍照了新图片（需要同步到银豹，覆盖旧图）
   bool _imageFromUser = false;
@@ -341,7 +347,11 @@ class _ReplenishFormState extends State<_ReplenishForm>
       // 等切页动画走完再处理图片，避免大图解码卡住动画
       Future<void>.delayed(const Duration(milliseconds: 250), () {
         if (mounted) {
-          unawaited(_useLocalPrefillImage(localBytes, data.imageUrl));
+          setState(() => _imageLoading = true);
+          unawaited(_useLocalPrefillImage(localBytes, data.imageUrl)
+              .whenComplete(() {
+            if (mounted) setState(() => _imageLoading = false);
+          }));
         }
       });
     } else if (data.imageUrl != null && data.imageUrl!.isNotEmpty) {
@@ -349,7 +359,11 @@ class _ReplenishFormState extends State<_ReplenishForm>
       // 预填图片来自银豹，标记为非手动上传（除非用户之后重新上传）
       _imageFromUser = false;
       Future<void>.delayed(const Duration(milliseconds: 250), () {
-        if (mounted) _downloadPrefillImage(data.imageUrl!);
+        if (!mounted) return;
+        setState(() => _imageLoading = true);
+        _downloadPrefillImage(data.imageUrl!).whenComplete(() {
+          if (mounted) setState(() => _imageLoading = false);
+        });
       });
     }
   }
@@ -1194,7 +1208,25 @@ class _ReplenishFormState extends State<_ReplenishForm>
                           filterQuality: FilterQuality.low,
                         ),
                       )
-                    : const Center(
+                    : _imageLoading
+                        ? const Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                SizedBox(
+                                    width: 22,
+                                    height: 22,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2)),
+                                SizedBox(height: 8),
+                                Text('照片加载中…',
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        color: AppConstants.textSecondary)),
+                              ],
+                            ),
+                          )
+                        : const Center(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -1528,6 +1560,8 @@ class _BookingFormState extends State<_BookingForm>
   /// 从查询页点「顾客预订」进来时，电话框自动拿焦点（手机号键盘直接弹出来）
   final _phoneFocus = FocusNode();
   File? _imageFile;
+  /// 预填照片正在下载/压缩，用于显示「照片加载中…」
+  bool _imageLoading = false;
   bool _submitting = false;
 
   @override
@@ -1587,12 +1621,20 @@ class _BookingFormState extends State<_BookingForm>
       // 等切页动画走完再处理图片
       Future<void>.delayed(const Duration(milliseconds: 250), () {
         if (mounted) {
-          unawaited(_useLocalImage(localBytes, data.imageUrl));
+          setState(() => _imageLoading = true);
+          unawaited(_useLocalImage(localBytes, data.imageUrl)
+              .whenComplete(() {
+            if (mounted) setState(() => _imageLoading = false);
+          }));
         }
       });
     } else if (data.imageUrl != null && data.imageUrl!.isNotEmpty) {
       Future<void>.delayed(const Duration(milliseconds: 250), () {
-        if (mounted) unawaited(_downloadImage(data.imageUrl!));
+        if (!mounted) return;
+        setState(() => _imageLoading = true);
+        unawaited(_downloadImage(data.imageUrl!).whenComplete(() {
+          if (mounted) setState(() => _imageLoading = false);
+        }));
       });
     }
     // 电话框自动拿焦点 → 系统直接弹出手机号键盘
@@ -1996,7 +2038,25 @@ class _BookingFormState extends State<_BookingForm>
                           filterQuality: FilterQuality.low,
                         ),
                       )
-                    : const Center(
+                    : _imageLoading
+                        ? const Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                SizedBox(
+                                    width: 22,
+                                    height: 22,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2)),
+                                SizedBox(height: 8),
+                                Text('照片加载中…',
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        color: AppConstants.textSecondary)),
+                              ],
+                            ),
+                          )
+                        : const Center(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
