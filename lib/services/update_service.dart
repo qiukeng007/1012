@@ -87,16 +87,25 @@ class UpdateService {
       // 新格式：PIC/app_version_full.txt 写 1.0.25（新版读这个）
       // 旧客户端只认 PIC/app_version.txt 里的构建号（如 58），两个文件都要维护
       var remoteText = '';
+      var fullSupported = false;
       try {
         final fullUri = Uri.parse('$url/PIC/app_version_full.txt?t=$ts');
         final fullResp =
             await http.get(fullUri).timeout(const Duration(seconds: 5));
         if (fullResp.statusCode == 200) {
+          fullSupported = true;
           remoteText =
               utf8.decode(fullResp.bodyBytes, allowMalformed: true).trim();
+        } else if (fullResp.statusCode == 404) {
+          fullSupported = false;
+        } else {
+          return '';
         }
-      } catch (_) {}
-      if (remoteText.isEmpty) {
+      } catch (_) {
+        // 网络异常不要退回旧构建号，否则会被误判成“必须更新”
+        return '';
+      }
+      if (remoteText.isEmpty && !fullSupported) {
         final uri = Uri.parse('$url/PIC/app_version.txt?t=$ts');
         final response =
             await http.get(uri).timeout(const Duration(seconds: 5));
