@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
 import '../widgets/crop_page.dart';
@@ -24,6 +26,22 @@ import '../widgets/copyable_error_dialog.dart';
 import '../widgets/scanner_view.dart';
 
 /// 补货页面（日常补货 + 顾客预定 + 订单查询）
+/// 在后台 isolate 里做「空白校验 + 压缩」：iPhone 上大图解压很慢，放主线程会卡住界面
+({Uint8List? bytes, String? blank, String? error}) _prepareImageTask(
+    Map<String, dynamic> arg) {
+  final bytes = arg['bytes'] as Uint8List;
+  final label = arg['label'] as String;
+  final blank = ImageQuality.blankReason(bytes, label: label);
+  if (blank != null) return (bytes: null, blank: blank, error: null);
+  final (n, e) = ImageQuality.normalizeForUpload(bytes);
+  return (bytes: n, blank: null, error: e);
+}
+
+Future<({Uint8List? bytes, String? blank, String? error})> _prepareImage(
+    List<int> raw, String label) {
+  return compute(_prepareImageTask,
+      <String, dynamic>{'bytes': Uint8List.fromList(raw), 'label': label});
+}
 class RestockPage extends StatefulWidget {
   final RestockService restockService;
   final RestockPrefillData? prefillData;
@@ -320,12 +338,19 @@ class _ReplenishFormState extends State<_ReplenishForm>
     if (localBytes != null && localBytes.isNotEmpty) {
       // 这张照片已经在后台队列里同步银豹了，不能当成「用户新拍的照片」再排一次队
       _imageFromUser = false;
-      unawaited(_useLocalPrefillImage(localBytes, data.imageUrl));
+      // 等切页动画走完再处理图片，避免大图解码卡住动画
+      Future<void>.delayed(const Duration(milliseconds: 250), () {
+        if (mounted) {
+          unawaited(_useLocalPrefillImage(localBytes, data.imageUrl));
+        }
+      });
     } else if (data.imageUrl != null && data.imageUrl!.isNotEmpty) {
       // 查询结果有图片时自动下载填入图片框（保留重新上传）
       // 预填图片来自银豹，标记为非手动上传（除非用户之后重新上传）
       _imageFromUser = false;
-      _downloadPrefillImage(data.imageUrl!);
+      Future<void>.delayed(const Duration(milliseconds: 250), () {
+        if (mounted) _downloadPrefillImage(data.imageUrl!);
+      });
     }
   }
 
@@ -342,7 +367,8 @@ class _ReplenishFormState extends State<_ReplenishForm>
   /// 不重新下载银豹上的旧图，也不重复入队（银豹那边队列已经在传了）。
   Future<void> _useLocalPrefillImage(
       List<int> bytes, String? fallbackUrl) async {
-    final blank = ImageQuality.blankReason(bytes, label: '刚提交的照片');
+    final prep = await _prepareImage(bytes, '刚提交的照片');
+    final blank = prep.blank;
     if (blank != null) {
       // 本地这张不能用就退回银豹上的图（有的话）
       if (fallbackUrl != null && fallbackUrl.isNotEmpty) {
@@ -352,7 +378,7 @@ class _ReplenishFormState extends State<_ReplenishForm>
       }
       return;
     }
-    final (normalized, _) = ImageQuality.normalizeForUpload(bytes);
+    final normalized = prep.bytes;
     final use = normalized ?? bytes;
     try {
       final out = File(
@@ -383,12 +409,14 @@ class _ReplenishFormState extends State<_ReplenishForm>
     }
     if (!mounted || raw == null || raw.isEmpty) return;
 
-    final blank = ImageQuality.blankReason(raw, label: '自动获取的照片');
+    final prep = await _prepareImage(raw, '自动获取的照片');
+    final blank = prep.blank;
     if (blank != null) {
       _showCopyableError('自动获取的照片不可用', '$blank\n\n来源：$url');
       return;
     }
-    final (normalized, normErr) = ImageQuality.normalizeForUpload(raw);
+    final normalized = prep.bytes;
+    final normErr = prep.error;
     if (normalized == null) {
       _showCopyableError(
           '自动获取的照片不可用', '${normErr ?? '无法解析这张照片'}\n\n来源：$url');
@@ -1556,9 +1584,16 @@ class _BookingFormState extends State<_BookingForm>
     }
     final localBytes = data.imageBytes;
     if (localBytes != null && localBytes.isNotEmpty) {
-      unawaited(_useLocalImage(localBytes, data.imageUrl));
+      // 等切页动画走完再处理图片
+      Future<void>.delayed(const Duration(milliseconds: 250), () {
+        if (mounted) {
+          unawaited(_useLocalImage(localBytes, data.imageUrl));
+        }
+      });
     } else if (data.imageUrl != null && data.imageUrl!.isNotEmpty) {
-      unawaited(_downloadImage(data.imageUrl!));
+      Future<void>.delayed(const Duration(milliseconds: 250), () {
+        if (mounted) unawaited(_downloadImage(data.imageUrl!));
+      });
     }
     // 电话框自动拿焦点 → 系统直接弹出手机号键盘
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1568,7 +1603,8 @@ class _BookingFormState extends State<_BookingForm>
 
   /// 队列里刚提交、还没同步完的照片：直接用本地字节
   Future<void> _useLocalImage(List<int> bytes, String? fallbackUrl) async {
-    final blank = ImageQuality.blankReason(bytes, label: '刚提交的照片');
+    final prep = await _prepareImage(bytes, '刚提交的照片');
+    final blank = prep.blank;
     if (blank != null) {
       if (fallbackUrl != null && fallbackUrl.isNotEmpty) {
         await _downloadImage(fallbackUrl);
@@ -1577,7 +1613,7 @@ class _BookingFormState extends State<_BookingForm>
       }
       return;
     }
-    final (normalized, _) = ImageQuality.normalizeForUpload(bytes);
+    final normalized = prep.bytes;
     final use = normalized ?? bytes;
     try {
       final out = File(
@@ -1601,12 +1637,13 @@ class _BookingFormState extends State<_BookingForm>
       raw = null;
     }
     if (!mounted || raw == null || raw.isEmpty) return;
-    final blank = ImageQuality.blankReason(raw, label: '自动获取的照片');
+    final prep = await _prepareImage(raw, '自动获取的照片');
+    final blank = prep.blank;
     if (blank != null) {
       _showMsg('自动获取的照片不可用，请重新拍照');
       return;
     }
-    final (normalized, _) = ImageQuality.normalizeForUpload(raw);
+    final normalized = prep.bytes;
     final use = normalized ?? raw;
     try {
       final out = File(
