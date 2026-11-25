@@ -96,10 +96,8 @@ class _TapFeedbackScopeState extends State<TapFeedbackScope> {
         final now = DateTime.now();
         if (now.difference(_last).inMilliseconds < 80) return;
         _last = now;
+        // 只保留系统点击音：震动放到具体按钮里，避免点空白也震动
         Feedback.forTap(context);
-        if (defaultTargetPlatform == TargetPlatform.android) {
-          HapticFeedback.lightImpact();
-        }
       },
       child: widget.child,
     );

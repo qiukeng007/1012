@@ -18,6 +18,7 @@ class AdvancedSettingsService extends ChangeNotifier {
   static const _keyUnit = 'adv_allow_unit';
   static const _keyCategory = 'adv_allow_category';
   static const _keyStock = 'adv_allow_stock';
+  static const _keyLock = 'adv_lock_config';
   static const _keyPrice = 'adv_allow_price';
   static const _keyExtBarcode = 'adv_allow_ext_barcode';
 
@@ -27,6 +28,7 @@ class AdvancedSettingsService extends ChangeNotifier {
   bool _allowUnit = true;
   bool _allowCategory = true;
   bool _allowStock = true;
+  bool _lockConfig = false;
   bool _allowPrice = true;
   bool _allowExtBarcode = true;
 
@@ -36,6 +38,9 @@ class AdvancedSettingsService extends ChangeNotifier {
   bool get allowUnit => _allowUnit;
   bool get allowCategory => _allowCategory;
   bool get allowStock => _allowStock;
+
+  /// 锁定配置页：所有输入框/开关不可修改（管理员入口仍可用）
+  bool get lockConfig => _lockConfig;
   bool get allowPrice => _allowPrice;
   bool get allowExtBarcode => _allowExtBarcode;
 
@@ -47,6 +52,7 @@ class AdvancedSettingsService extends ChangeNotifier {
     _allowUnit = prefs.getBool(_keyUnit) ?? true;
     _allowCategory = prefs.getBool(_keyCategory) ?? true;
     _allowStock = prefs.getBool(_keyStock) ?? true;
+    _lockConfig = prefs.getBool(_keyLock) ?? false;
     _allowPrice = prefs.getBool(_keyPrice) ?? true;
     _allowExtBarcode = prefs.getBool(_keyExtBarcode) ?? true;
     _loaded = true;
@@ -89,6 +95,14 @@ class AdvancedSettingsService extends ChangeNotifier {
     _loaded = true;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keyStock, value);
+    notifyListeners();
+  }
+
+  Future<void> setLockConfig(bool value) async {
+    _lockConfig = value;
+    _loaded = true;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyLock, value);
     notifyListeners();
   }
 

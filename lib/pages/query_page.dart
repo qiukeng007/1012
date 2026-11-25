@@ -551,6 +551,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   }
 
   Future<void> _query(String barcode) async {
+    HapticFeedback.lightImpact();
     if (barcode.trim().isEmpty) return;
     _barcodeFocus.unfocus(); // 收起键盘
     _cancelTransfer(); // 新搜索清空调货状态
@@ -5455,6 +5456,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   }
 
   Future<void> _confirmTransfer() async {
+    HapticFeedback.lightImpact();
     if (!AdvancedSettingsService.instance.allowStock) return;
     if (_transferQty == 0 || _lastResult == null) return;
     final qty = _transferQty.abs();

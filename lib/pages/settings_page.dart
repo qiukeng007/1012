@@ -1018,10 +1018,43 @@ class _SettingsPageState extends State<SettingsPage>
           ),
     ];
 
+    final locked = AdvancedSettingsService.instance.lockConfig;
     return ListView.builder(
       padding: const EdgeInsets.only(bottom: 24),
-      itemCount: sections.length,
-      itemBuilder: (_, i) => sections[i](),
+      itemCount: sections.length + (locked ? 1 : 0),
+      itemBuilder: (_, i) {
+        if (locked && i == 0) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF3CD),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFFFE08A)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.lock_outline, size: 16, color: Color(0xFF8A6D3B)),
+                  SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '配置已锁定：只能查看，不能修改。',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF8A6D3B)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        final idx = locked ? i - 1 : i;
+        final w = sections[idx]();
+        // 最后两个是「高级设置入口」「版本号入口」：锁定后仍要能用
+        final isAdminEntry = idx >= sections.length - 2;
+        if (!locked || isAdminEntry) return w;
+        return AbsorbPointer(absorbing: true, child: w);
+      },
     );
   }
   /// 照片队列日志：按 条码/商品/门店/状态 过滤；

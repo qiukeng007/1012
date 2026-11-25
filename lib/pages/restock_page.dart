@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
 import '../widgets/crop_page.dart';
@@ -669,6 +670,7 @@ class _ReplenishFormState extends State<_ReplenishForm>
   }
 
   Future<void> _submit() async {
+    HapticFeedback.lightImpact();
     if (!_formKey.currentState!.validate()) return;
     if (_selectedShop == null || _selectedShop!.isEmpty) {
       _showMsg('请填写供货商');
@@ -1743,6 +1745,7 @@ class _BookingFormState extends State<_BookingForm>
   }
 
   Future<void> _submit() async {
+    HapticFeedback.lightImpact();
     if (!_formKey.currentState!.validate()) return;
     if (_phoneCtrl.text.trim().isEmpty) {
       _showMsg('请输入顾客电话');

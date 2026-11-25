@@ -58,6 +58,16 @@ class _AdvancedSettingsPageState extends State<AdvancedSettingsPage> {
                   child: Column(
                     children: [
                       _switchTile(
+                        icon: Icons.lock_outline,
+                        title: '锁定配置',
+                        subtitle: '开启后配置页所有输入框和开关都不能修改（管理员入口仍可用）',
+                        value: _svc.lockConfig,
+                        onChanged: (v) async {
+                          await _svc.setLockConfig(v);
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                      const Divider(height: 1),                      _switchTile(
                         icon: Icons.drive_file_rename_outline,
                         title: '商品名称修改',
                         subtitle: '双击商品名称可改名并同步到门店',
