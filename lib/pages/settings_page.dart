@@ -1049,11 +1049,8 @@ class _SettingsPageState extends State<SettingsPage>
           );
         }
         final idx = locked ? i - 1 : i;
-        final w = sections[idx]();
-        // 最后两个是「高级设置入口」「版本号入口」：锁定后仍要能用
-        final isAdminEntry = idx >= sections.length - 2;
-        if (!locked || isAdminEntry) return w;
-        return AbsorbPointer(absorbing: true, child: w);
+        // 锁定只作用于输入框（见下面的 readOnly），登录/测试等按钮保持可用
+        return sections[idx]();
       },
     );
   }
@@ -1164,7 +1161,7 @@ class _SettingsPageState extends State<SettingsPage>
                     TextStyle(fontSize: 12, color: AppConstants.textSecondary)),
             const SizedBox(height: 8),
             if (_photoJobs.isNotEmpty) ...[
-              TextField(
+              TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
                 controller: _photoFilterCtrl,
                 onChanged: (v) => setState(() => _photoFilter = v.trim()),
                 style: const TextStyle(fontSize: 13),
@@ -1633,8 +1630,8 @@ class _SettingsPageState extends State<SettingsPage>
     bool readOnly = false,
   }) {
     return TextField(
+      readOnly: readOnly || AdvancedSettingsService.instance.lockConfig,
       maxLines: maxLines,
-      readOnly: readOnly,
       controller: ctrl,
       decoration: InputDecoration(
         labelText: label,
@@ -1786,7 +1783,7 @@ class _SettingsPageState extends State<SettingsPage>
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: TextField(
+        child: TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
           controller: _baseUrlCtrl,
           decoration: const InputDecoration(
             labelText: '银豹后台地址',
@@ -2117,7 +2114,7 @@ class _SettingsPageState extends State<SettingsPage>
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: TextField(
+              child: TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
                 controller: ctrl,
                 style: const TextStyle(fontSize: 13),
                 decoration: InputDecoration(
@@ -2190,7 +2187,7 @@ class _SettingsPageState extends State<SettingsPage>
                   fontSize: 13, color: AppConstants.textSecondary))),
       const SizedBox(width: 8),
       Expanded(
-        child: TextField(
+        child: TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
           controller: ctrl,
           obscureText: obscure,
           style: const TextStyle(fontSize: 13),
@@ -2396,7 +2393,7 @@ class _SettingsPageState extends State<SettingsPage>
         context: context,
         builder: (ctx) => AlertDialog(
               title: const Text('新建场地配置'),
-              content: TextField(
+              content: TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
                   controller: ctrl,
                   decoration: const InputDecoration(
                       hintText: '例如: 家里、店铺2', border: OutlineInputBorder()),
@@ -2428,7 +2425,7 @@ class _SettingsPageState extends State<SettingsPage>
         builder: (ctx) => AlertDialog(
               title: const Text('重命名 / 删除场地'),
               content: Column(mainAxisSize: MainAxisSize.min, children: [
-                TextField(
+                TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
                     controller: ctrl,
                     decoration: const InputDecoration(
                         hintText: '新名称', border: OutlineInputBorder()),
@@ -2523,7 +2520,7 @@ class _SettingsPageState extends State<SettingsPage>
       child: Row(children: [
         Expanded(
             flex: 2,
-            child: TextField(
+            child: TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
               decoration: const InputDecoration(
                   isDense: true,
                   contentPadding:
@@ -2536,7 +2533,7 @@ class _SettingsPageState extends State<SettingsPage>
         const SizedBox(width: 4),
         Expanded(
             flex: 3,
-            child: TextField(
+            child: TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
               decoration: const InputDecoration(
                   isDense: true,
                   contentPadding:
@@ -2549,7 +2546,7 @@ class _SettingsPageState extends State<SettingsPage>
         const SizedBox(width: 4),
         SizedBox(
             width: 60,
-            child: TextField(
+            child: TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
               decoration: const InputDecoration(
                   isDense: true,
                   contentPadding:
@@ -3041,7 +3038,7 @@ class _SettingsPageState extends State<SettingsPage>
               ],
             ),
             const SizedBox(height: 10),
-            TextField(
+            TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
               controller: ctrl,
               autofocus: true,
               obscureText: true,
@@ -3119,7 +3116,7 @@ class _SettingsPageState extends State<SettingsPage>
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('管理员验证'),
-        content: TextField(
+        content: TextField(readOnly: AdvancedSettingsService.instance.lockConfig, 
           controller: ctrl,
           autofocus: true,
           obscureText: true,
