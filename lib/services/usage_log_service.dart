@@ -179,6 +179,7 @@ class UsageLogService {
         await _diag('补传跳过：本地无记录文件（尚未登录过）');
         return '本地无记录文件';
       }
+      await _migrateLegacyFiles(dir);
       final files = dir
           .listSync()
           .whereType<File>()
@@ -418,6 +419,9 @@ class UsageLogService {
     }
   }
 
+  /// 供「停用名单」匹配用的完整标识（操作员+设备+识别码）
+  Future<String> deviceFileBaseFor(String operator) => _fileBase(operator);
+
   /// 上传文件名：操作员 + 设备 + 识别码，例如 蚊子Android1a2b3c
   /// 避免多个用户用同一个操作员名时互相覆盖服务器上的文件。
   Future<String> _fileBase(String operator) async {
@@ -434,6 +438,37 @@ class UsageLogService {
       }
     } catch (_) {}
     return base;
+  }
+  /// 把旧版「操作员.txt」迁移成「操作员+设备+识别码.txt」。
+  /// 已存在的则合并内容并删掉旧文件，避免每次启动上传两份。
+  Future<void> _migrateLegacyFiles(Directory dir) async {
+    try {
+      final tag = _deviceTag;
+      final id = await _deviceId();
+      final newPattern = RegExp('(Android|iOS|Other)[0-9a-f]{6}\$');
+      for (final f in dir.listSync().whereType<File>()) {
+        final name = f.uri.pathSegments.isNotEmpty
+            ? f.uri.pathSegments.last
+            : '';
+        if (!name.toLowerCase().endsWith('.txt')) continue;
+        final base = name.substring(0, name.length - 4);
+        if (newPattern.hasMatch(base)) continue; // 已经是新格式（含别的设备）
+        final target =
+            File('${dir.path}${Platform.pathSeparator}$base$tag$id.txt');
+        if (await target.exists()) {
+          final oldTxt = await f.readAsString();
+          final newTxt = await target.readAsString();
+          final merged = <String>{}
+            ..addAll(oldTxt.split('\n').map((e) => e.trim()))
+            ..addAll(newTxt.split('\n').map((e) => e.trim()));
+          merged.removeWhere((e) => e.isEmpty);
+          await target.writeAsString('${merged.join('\r\n')}\r\n');
+          await f.delete();
+        } else {
+          await f.rename(target.path);
+        }
+      }
+    } catch (_) {}
   }
   /// 本地追加一行到「操作员.txt」，只保留最近 _maxLines 行（老的自动丢掉）。
   /// 上传的是整份文件，所以上传内容也自然只带最近 100 行。

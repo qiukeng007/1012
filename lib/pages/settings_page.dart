@@ -117,9 +117,14 @@ class _SettingsPageState extends State<SettingsPage>
   void initState() {
     super.initState();
     PhotoQueueService.instance.addListener(_reloadPhotoJobs);
+    AdvancedSettingsService.instance.addListener(_onAdvSettingsChanged);
     _reloadPhotoJobs();
     _batteryOptFuture = ForegroundService.isIgnoringBatteryOptimizations();
     _initMode();
+  }
+
+  void _onAdvSettingsChanged() {
+    if (mounted) setState(() {});
   }
 
   /// 先读取持久化的登录模式，再加载配置
@@ -165,6 +170,7 @@ class _SettingsPageState extends State<SettingsPage>
     _serverCheckTimer?.cancel();
     _photoJobsDebounce?.cancel();
     PhotoQueueService.instance.removeListener(_reloadPhotoJobs);
+    AdvancedSettingsService.instance.removeListener(_onAdvSettingsChanged);
     _serverCtrl.dispose();
     _suppliersCtrl.dispose();
     _masterAccountCtrl.dispose();

@@ -773,7 +773,12 @@ class _HomePageState extends State<HomePage>
     _lastUserStatusKey = key;
     _lastUserStatusCheck = now;
 
-    final st = await UserStatusService.check(url, op);
+    // 停用名单既可以写操作员名，也可以写「操作员+设备+识别码」只停用某台设备
+    String fileBase = '';
+    try {
+      fileBase = await UsageLogService.instance.deviceFileBaseFor(op);
+    } catch (_) {}
+    final st = await UserStatusService.check(url, op, fileBase: fileBase);
     if (!mounted || st.enabled || _userBlockedDialogOpen) return;
 
     _userBlockedDialogOpen = true;

@@ -18,7 +18,8 @@ class UserStatusResult {
 /// 文件不存在 / 网络失败 → 默认允许，避免误锁人。
 class UserStatusService {
   static Future<UserStatusResult> check(
-      String serverUrl, String operator) async {
+      String serverUrl, String operator,
+      {String fileBase = ''}) async {
     final url = UpdateService.normalizeUrl(serverUrl);
     final name = operator.trim();
     if (url.isEmpty || name.isEmpty) {
@@ -33,13 +34,13 @@ class UserStatusService {
       }
       // 服务器一般不带 charset，按 UTF-8 解（中文操作员名）
       final body = utf8.decode(resp.bodyBytes, allowMalformed: true);
-      return _parse(body, name);
+      return _parse(body, name, fileBase);
     } catch (_) {
       return const UserStatusResult(enabled: true);
     }
   }
 
-  static UserStatusResult _parse(String raw, String name) {
+  static UserStatusResult _parse(String raw, String name, String fileBase) {
     var defaultEnabled = true;
     var defaultReason = '';
     bool? explicit;
@@ -59,7 +60,7 @@ class UserStatusService {
         defaultEnabled = enabled;
         defaultReason = reason;
       }
-      if (who == name) {
+      if (who == name || (fileBase.isNotEmpty && who == fileBase)) {
         explicit = enabled;
         explicitReason = reason;
       }

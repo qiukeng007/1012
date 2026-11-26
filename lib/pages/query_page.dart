@@ -2866,6 +2866,7 @@ class _QueryPageState extends State<QueryPage> with AutomaticKeepAliveClientMixi
   }
 
   void _handleRestock(MultiStoreResult r, {bool booking = false}) {
+    HapticFeedback.lightImpact();
     final firstData = _currentProductData(r);
     final barcode = (firstData?.barcode.isNotEmpty == true)
         ? firstData!.barcode
